@@ -1,0 +1,31 @@
+{
+  "name": "watchapp",
+  "author": "MakeAwesomeHappen",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "watchapp",
+    "uuid": "01b2779a-f792-4ea5-9ba9-afe970d04e8e",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": {
+      "TERMINAL_DATA": 100,
+      "PROMPT_FLAG": 101,
+      "PROMPT_TEXT": 102
+    },
+    "resources": {
+      "media": []
+    }
+  }
+}

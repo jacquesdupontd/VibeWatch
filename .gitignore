@@ -1,0 +1,4 @@
+node_modules/
+watchapp/build/
+.pebble-sdk/
+*.log
