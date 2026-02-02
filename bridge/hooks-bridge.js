@@ -9,17 +9,48 @@ const LINE_W = 23;
 const MAX_LINES = 40;
 
 // Per-session state
-const sessions = {}; // session_id -> { lines: [], currentTool, lastActivity }
+const sessions = {}; // session_id -> { lines: [], currentTool, lastActivity, lastTranscriptLine, transcriptPath }
 
 // Which session the watch is viewing (null = auto-follow latest)
 let watchedSession = null;
 
 function getSession(id) {
     if (!sessions[id]) {
-        sessions[id] = { lines: [], currentTool: null, lastActivity: Date.now() };
+        sessions[id] = { lines: [], currentTool: null, lastActivity: Date.now(), lastTranscriptLine: 0, transcriptPath: null };
     }
     sessions[id].lastActivity = Date.now();
     return sessions[id];
+}
+
+// Check transcript for new assistant text
+function checkTranscript(session) {
+    if (!session.transcriptPath || !fs.existsSync(session.transcriptPath)) return;
+    try {
+        const allLines = fs.readFileSync(session.transcriptPath, 'utf8').trim().split('\n');
+        const startFrom = session.lastTranscriptLine;
+        session.lastTranscriptLine = allLines.length;
+        for (let i = startFrom; i < allLines.length; i++) {
+            try {
+                const entry = JSON.parse(allLines[i]);
+                if (entry.type === 'assistant' && entry.message && entry.message.content) {
+                    const texts = entry.message.content.filter(c => c.type === 'text');
+                    for (const t of texts) {
+                        if (!t.text || t.text.trim().length < 3) continue;
+                        // Show each sentence/paragraph, trimmed for watch
+                        const clean = t.text.replace(/\n+/g, ' ').trim();
+                        // Split into sentences, show each
+                        const sentences = clean.match(/[^.!?]+[.!?]+/g) || [clean];
+                        for (const s of sentences) {
+                            const trimmed = s.trim();
+                            if (trimmed.length > 2) {
+                                addLine(session, 'W', trimmed.substring(0, 80));
+                            }
+                        }
+                    }
+                }
+            } catch {}
+        }
+    } catch {}
 }
 
 // Auto-select: most recently active session
@@ -152,6 +183,10 @@ function handleEvent(event) {
     const session = getSession(sessionId);
     const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit' });
 
+    // Track transcript path and check for new assistant text
+    if (event.transcript_path) session.transcriptPath = event.transcript_path;
+    checkTranscript(session);
+
     switch (hookName) {
         case 'SessionStart':
             session.lines = [];
@@ -214,34 +249,10 @@ function handleEvent(event) {
             break;
         }
 
-        case 'Stop': {
+        case 'Stop':
             session.currentTool = null;
-            // Extract first sentence of Claude's last message
-            if (event.transcript_path) {
-                try {
-                    const tlines = fs.readFileSync(event.transcript_path, 'utf8').trim().split('\n');
-                    for (let i = tlines.length - 1; i >= 0; i--) {
-                        try {
-                            const entry = JSON.parse(tlines[i]);
-                            if (entry.type === 'assistant' && entry.message && entry.message.content) {
-                                const texts = entry.message.content.filter(c => c.type === 'text');
-                                if (texts.length > 0) {
-                                    let msg = texts.map(t => t.text).join(' ').replace(/\n/g, ' ').trim();
-                                    // First sentence only
-                                    const dot = msg.search(/[.!?]\s/);
-                                    if (dot > 0 && dot < 80) msg = msg.substring(0, dot + 1);
-                                    else msg = msg.substring(0, 60);
-                                    addLine(session, 'W', msg);
-                                    break;
-                                }
-                            }
-                        } catch {}
-                    }
-                } catch {}
-            }
             addLine(session, 'G', '-- Done ' + ts + ' --');
             break;
-        }
 
         case 'SessionEnd':
             addLine(session, 'L', '-- Ended --');
