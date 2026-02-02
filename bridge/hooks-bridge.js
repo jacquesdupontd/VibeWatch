@@ -114,16 +114,35 @@ function formatToolStart(name, input) {
 
 function formatToolResult(name, response) {
     if (!response) return null;
-    const text = typeof response === 'string' ? response : JSON.stringify(response);
-    if (/error|Error|FAIL/i.test(text)) {
-        const lines = text.split('\n').filter(l => /error|Error|FAIL/i.test(l));
-        if (lines.length > 0) return lines[0].substring(0, 60);
+    // Extract text from structured responses
+    let text = '';
+    if (typeof response === 'string') {
+        text = response;
+    } else if (response.stdout) {
+        text = response.stdout;
+    } else if (response.output) {
+        text = response.output;
+    } else if (response.content) {
+        text = typeof response.content === 'string' ? response.content : '';
+    } else {
+        text = JSON.stringify(response);
+        // Don't show raw JSON objects on the watch
+        if (text.startsWith('{') && text.length > 80) return null;
     }
-    if (/success|Success|OK|passed/i.test(text)) {
-        const lines = text.split('\n').filter(l => /success|Success|OK|passed/i.test(l));
-        if (lines.length > 0) return lines[0].substring(0, 60);
+    text = text.replace(/\n/g, ' ').trim();
+    if (!text) return null;
+
+    // Only show meaningful results: errors, successes, or very short output
+    if (/error|fail|exception|not found|denied/i.test(text)) {
+        // Find the most relevant error line
+        const parts = text.split(/\s{2,}/).filter(l => /error|fail|exception/i.test(l));
+        return (parts[0] || text).substring(0, 50);
     }
-    if (text.length < 80) return text.replace(/\n/g, ' ').trim();
+    if (/success|passed|created|built|installed|compiled|done/i.test(text)) {
+        return text.substring(0, 50);
+    }
+    // Short results only
+    if (text.length < 50) return text;
     return null;
 }
 
@@ -196,20 +215,22 @@ function handleEvent(event) {
         }
 
         case 'Stop': {
-            addLine(session, 'G', '-- Done ' + ts + ' --');
             session.currentTool = null;
-            // Extract Claude's last message from transcript
+            // Extract first sentence of Claude's last message
             if (event.transcript_path) {
                 try {
-                    const lines = fs.readFileSync(event.transcript_path, 'utf8').trim().split('\n');
-                    for (let i = lines.length - 1; i >= 0; i--) {
+                    const tlines = fs.readFileSync(event.transcript_path, 'utf8').trim().split('\n');
+                    for (let i = tlines.length - 1; i >= 0; i--) {
                         try {
-                            const entry = JSON.parse(lines[i]);
+                            const entry = JSON.parse(tlines[i]);
                             if (entry.type === 'assistant' && entry.message && entry.message.content) {
                                 const texts = entry.message.content.filter(c => c.type === 'text');
                                 if (texts.length > 0) {
-                                    const msg = texts.map(t => t.text).join(' ')
-                                        .replace(/\n/g, ' ').substring(0, 120);
+                                    let msg = texts.map(t => t.text).join(' ').replace(/\n/g, ' ').trim();
+                                    // First sentence only
+                                    const dot = msg.search(/[.!?]\s/);
+                                    if (dot > 0 && dot < 80) msg = msg.substring(0, dot + 1);
+                                    else msg = msg.substring(0, 60);
                                     addLine(session, 'W', msg);
                                     break;
                                 }
@@ -218,6 +239,7 @@ function handleEvent(event) {
                     }
                 } catch {}
             }
+            addLine(session, 'G', '-- Done ' + ts + ' --');
             break;
         }
 
