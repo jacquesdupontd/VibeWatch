@@ -1,20 +1,36 @@
 const http = require('http');
 const WebSocket = require('ws');
 const fs = require('fs');
-const path = require('path');
+const url = require('url');
 
 const WS_PORT = 8080;
 const HTTP_PORT = 8081;
 const LINE_W = 23;
-
-// Rolling buffer of formatted lines for the watch
-let screenLines = [];
 const MAX_LINES = 40;
 
-// Current state
-let currentTool = null;
-let waitingForPermission = false;
-let permissionOptions = null;
+// Per-session state
+const sessions = {}; // session_id -> { lines: [], currentTool, lastActivity }
+
+// Which session the watch is viewing (null = auto-follow latest)
+let watchedSession = null;
+
+function getSession(id) {
+    if (!sessions[id]) {
+        sessions[id] = { lines: [], currentTool: null, lastActivity: Date.now() };
+    }
+    sessions[id].lastActivity = Date.now();
+    return sessions[id];
+}
+
+// Auto-select: most recently active session
+function activeSessionId() {
+    if (watchedSession && sessions[watchedSession]) return watchedSession;
+    let best = null, bestTime = 0;
+    for (const [id, s] of Object.entries(sessions)) {
+        if (s.lastActivity > bestTime) { bestTime = s.lastActivity; best = id; }
+    }
+    return best;
+}
 
 function hyphenate(text, width) {
     const words = text.split(' ');
@@ -53,15 +69,18 @@ function hyphenate(text, width) {
     return lines.join('\n');
 }
 
-function addLine(color, text) {
-    // Hyphenate and split into multiple screen lines if needed
+function addLine(session, color, text) {
     const wrapped = hyphenate(text, LINE_W);
     for (const l of wrapped.split('\n')) {
-        if (l.trim()) {
-            screenLines.push(color + l);
-        }
+        if (l.trim()) session.lines.push(color + l);
     }
-    while (screenLines.length > MAX_LINES) screenLines.shift();
+    while (session.lines.length > MAX_LINES) session.lines.shift();
+    broadcastIfActive(session);
+}
+
+function broadcastIfActive(session) {
+    const activeId = activeSessionId();
+    if (!activeId || sessions[activeId] !== session) return;
     broadcastScreen();
 }
 
@@ -73,7 +92,6 @@ function shortenPath(p) {
 
 function shortenCommand(cmd) {
     if (!cmd) return '';
-    // Shorten common patterns
     cmd = cmd.replace(/\/Users\/[^/]+\/Documents\/[^/]+\/[^/]+\//g, '');
     if (cmd.length > 60) cmd = cmd.substring(0, 57) + '...';
     return cmd;
@@ -81,67 +99,60 @@ function shortenCommand(cmd) {
 
 function formatToolStart(name, input) {
     switch (name) {
-        case 'Bash':
-            return shortenCommand(input.command || '');
-        case 'Read':
-            return shortenPath(input.file_path || '');
-        case 'Edit':
-            return shortenPath(input.file_path || '');
-        case 'Write':
-            return shortenPath(input.file_path || '');
-        case 'Grep':
-            return (input.pattern || '').substring(0, 30);
-        case 'Glob':
-            return (input.pattern || '').substring(0, 30);
-        case 'WebFetch':
-            return (input.url || '').substring(0, 40);
-        case 'WebSearch':
-            return (input.query || '').substring(0, 40);
-        case 'Task':
-            return (input.description || '').substring(0, 30);
-        default:
-            return name;
+        case 'Bash': return shortenCommand(input.command || '');
+        case 'Read': return shortenPath(input.file_path || '');
+        case 'Edit': return shortenPath(input.file_path || '');
+        case 'Write': return shortenPath(input.file_path || '');
+        case 'Grep': return (input.pattern || '').substring(0, 30);
+        case 'Glob': return (input.pattern || '').substring(0, 30);
+        case 'WebFetch': return (input.url || '').substring(0, 40);
+        case 'WebSearch': return (input.query || '').substring(0, 40);
+        case 'Task': return (input.description || '').substring(0, 30);
+        default: return name;
     }
 }
 
 function formatToolResult(name, response) {
     if (!response) return null;
     const text = typeof response === 'string' ? response : JSON.stringify(response);
-    // Extract key info from result
-    if (text.includes('error') || text.includes('Error') || text.includes('FAIL')) {
+    if (/error|Error|FAIL/i.test(text)) {
         const lines = text.split('\n').filter(l => /error|Error|FAIL/i.test(l));
         if (lines.length > 0) return lines[0].substring(0, 60);
     }
-    if (text.includes('success') || text.includes('Success') || text.includes('OK')) {
-        const lines = text.split('\n').filter(l => /success|Success|OK/i.test(l));
+    if (/success|Success|OK|passed/i.test(text)) {
+        const lines = text.split('\n').filter(l => /success|Success|OK|passed/i.test(l));
         if (lines.length > 0) return lines[0].substring(0, 60);
     }
-    // For short results, show them
     if (text.length < 80) return text.replace(/\n/g, ' ').trim();
     return null;
 }
 
-// Handle hook events
 function handleEvent(event) {
     const hookName = event.hook_event_name;
+    const sessionId = event.session_id || 'unknown';
+    const session = getSession(sessionId);
     const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit' });
 
     switch (hookName) {
         case 'SessionStart':
-            screenLines = [];
-            addLine('C', '-- Session ' + ts + ' --');
-            addLine('W', 'Model: ' + (event.model || 'unknown'));
+            session.lines = [];
+            addLine(session, 'C', '-- Session ' + ts + ' --');
+            if (event.model) {
+                const model = event.model.replace('claude-', '').split('-202')[0];
+                addLine(session, 'L', model);
+            }
+            // Show short session id for identification
+            addLine(session, 'L', 'id:' + sessionId.substring(0, 8));
             break;
 
         case 'UserPromptSubmit':
-            addLine('Y', '> ' + (event.prompt || '').substring(0, 100));
+            addLine(session, 'Y', '> ' + (event.prompt || '').substring(0, 100));
             break;
 
         case 'PreToolUse': {
             const name = event.tool_name || '?';
             const detail = formatToolStart(name, event.tool_input || {});
-            currentTool = name;
-            // Tool icon based on type
+            session.currentTool = name;
             let icon = '$';
             if (name === 'Read') icon = 'R';
             else if (name === 'Edit') icon = 'E';
@@ -150,80 +161,70 @@ function handleEvent(event) {
             else if (name === 'Grep' || name === 'Glob') icon = '?';
             else if (name === 'Task') icon = 'T';
             else icon = name.charAt(0);
-
-            addLine('C', '[' + icon + '] ' + detail);
+            addLine(session, 'C', '[' + icon + '] ' + detail);
             break;
         }
 
         case 'PostToolUse': {
-            const name = event.tool_name || '?';
-            const result = formatToolResult(name, event.tool_response);
+            const result = formatToolResult(event.tool_name || '?', event.tool_response);
             if (result) {
-                // Detect errors vs success
                 if (/error|fail|exception/i.test(result)) {
-                    addLine('R', '[X] ' + result);
+                    addLine(session, 'R', '[X] ' + result);
                 } else if (/success|ok|created|built|pass/i.test(result)) {
-                    addLine('G', '[OK] ' + result);
+                    addLine(session, 'G', '[OK] ' + result);
                 } else {
-                    addLine('L', result);
+                    addLine(session, 'L', result);
                 }
             }
-            currentTool = null;
+            session.currentTool = null;
             break;
         }
 
-        case 'PostToolUseFailure': {
-            const err = event.error || 'Unknown error';
-            addLine('R', '[FAIL] ' + err.substring(0, 60));
-            currentTool = null;
+        case 'PostToolUseFailure':
+            addLine(session, 'R', '[FAIL] ' + (event.error || 'error').substring(0, 60));
+            session.currentTool = null;
             break;
-        }
 
         case 'Notification': {
-            const msg = event.message || '';
             const type = event.notification_type || '';
             if (type === 'permission_prompt') {
-                addLine('O', '[!] Permission needed');
-                waitingForPermission = true;
+                addLine(session, 'O', '[!] Permission needed');
             } else {
-                addLine('W', msg.substring(0, 80));
+                addLine(session, 'W', (event.message || '').substring(0, 80));
             }
             break;
         }
 
-        case 'Stop':
-            addLine('G', '-- Done ' + ts + ' --');
-            currentTool = null;
+        case 'Stop': {
+            addLine(session, 'G', '-- Done ' + ts + ' --');
+            session.currentTool = null;
+            // Extract Claude's last message from transcript
+            if (event.transcript_path) {
+                try {
+                    const lines = fs.readFileSync(event.transcript_path, 'utf8').trim().split('\n');
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        try {
+                            const entry = JSON.parse(lines[i]);
+                            if (entry.type === 'assistant' && entry.message && entry.message.content) {
+                                const texts = entry.message.content.filter(c => c.type === 'text');
+                                if (texts.length > 0) {
+                                    const msg = texts.map(t => t.text).join(' ')
+                                        .replace(/\n/g, ' ').substring(0, 120);
+                                    addLine(session, 'W', msg);
+                                    break;
+                                }
+                            }
+                        } catch {}
+                    }
+                } catch {}
+            }
             break;
+        }
 
         case 'SessionEnd':
-            addLine('L', '-- Session ended --');
+            addLine(session, 'L', '-- Ended --');
             break;
-
-        default:
-            // Log but don't display minor events
-            console.log('Hook event:', hookName);
     }
-}
-
-// Read the transcript to get Claude's latest message
-function getLastAssistantMessage(transcriptPath) {
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
-    try {
-        const lines = fs.readFileSync(transcriptPath, 'utf8').trim().split('\n');
-        for (let i = lines.length - 1; i >= 0; i--) {
-            try {
-                const entry = JSON.parse(lines[i]);
-                if (entry.type === 'assistant' && entry.message && entry.message.content) {
-                    const textParts = entry.message.content.filter(c => c.type === 'text');
-                    if (textParts.length > 0) {
-                        return textParts.map(t => t.text).join(' ');
-                    }
-                }
-            } catch {}
-        }
-    } catch {}
-    return null;
 }
 
 // WebSocket for watch
@@ -234,12 +235,11 @@ let activeWs = null;
 
 function broadcastScreen() {
     if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return;
-    const content = screenLines.join('\n');
+    const id = activeSessionId();
+    if (!id) return;
+    const session = sessions[id];
+    const content = session.lines.join('\n');
     const msg = { type: 'output', content };
-    // Add prompt if waiting for permission
-    if (waitingForPermission && permissionOptions) {
-        msg.prompt = permissionOptions;
-    }
     activeWs.send(JSON.stringify(msg));
 }
 
@@ -252,8 +252,23 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(msg.toString());
             console.log('FROM WATCH:', JSON.stringify(data));
-            // For now, watch button presses are logged
-            // In the future, we could pipe responses back to Claude Code
+            // UP button: cycle to previous session
+            // DOWN button: cycle to next session
+            // SELECT: back to auto-follow
+            if (data.type === 'key') {
+                const ids = Object.keys(sessions).sort((a, b) =>
+                    sessions[b].lastActivity - sessions[a].lastActivity);
+                if (ids.length <= 1) return;
+                const currentIdx = ids.indexOf(watchedSession);
+                if (data.content === 'prev') {
+                    watchedSession = ids[(currentIdx + 1) % ids.length];
+                } else if (data.content === 'next') {
+                    watchedSession = ids[(currentIdx - 1 + ids.length) % ids.length];
+                } else if (data.content === 'auto') {
+                    watchedSession = null;
+                }
+                broadcastScreen();
+            }
         } catch {}
     });
 
@@ -263,43 +278,59 @@ wss.on('connection', (ws) => {
     });
 });
 
-// HTTP server for receiving hook events
+// HTTP server for hook events
 const httpServer = http.createServer((req, res) => {
-    if (req.method === 'POST' && req.url === '/event') {
+    const parsed = url.parse(req.url, true);
+
+    if (req.method === 'POST' && parsed.pathname === '/event') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
             try {
                 const event = JSON.parse(body);
-                console.log('[' + new Date().toLocaleTimeString() + '] HOOK:', event.hook_event_name,
-                    event.tool_name ? '(' + event.tool_name + ')' : '');
+                const sid = (event.session_id || 'unknown').substring(0, 8);
+                console.log('[' + new Date().toLocaleTimeString() + '] [' + sid + '] HOOK:',
+                    event.hook_event_name, event.tool_name ? '(' + event.tool_name + ')' : '');
                 handleEvent(event);
-
-                // On Stop, try to extract Claude's last message from transcript
-                if (event.hook_event_name === 'Stop' && event.transcript_path) {
-                    const lastMsg = getLastAssistantMessage(event.transcript_path);
-                    if (lastMsg) {
-                        // Show a summary (first ~100 chars)
-                        const summary = lastMsg.substring(0, 120).replace(/\n/g, ' ');
-                        addLine('W', summary);
-                    }
-                }
-
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end('{"ok":true}');
             } catch (e) {
-                console.error('Parse error:', e.message);
                 res.writeHead(400);
                 res.end('{"error":"parse"}');
             }
         });
-    } else if (req.method === 'GET' && req.url === '/status') {
+    } else if (req.method === 'GET' && parsed.pathname === '/status') {
+        const id = activeSessionId();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-            lines: screenLines.length,
+            sessions: Object.keys(sessions).length,
+            activeSession: id ? id.substring(0, 8) : null,
+            watching: watchedSession ? watchedSession.substring(0, 8) : 'auto',
             connected: activeWs !== null,
-            currentTool
         }));
+    } else if (req.method === 'POST' && parsed.pathname === '/watch') {
+        // POST /watch?session=abc123 to pin a session
+        // POST /watch?session=auto to auto-follow
+        const sid = parsed.query.session;
+        if (sid === 'auto') {
+            watchedSession = null;
+        } else if (sid) {
+            // Find full session id matching prefix
+            const match = Object.keys(sessions).find(id => id.startsWith(sid));
+            if (match) watchedSession = match;
+        }
+        broadcastScreen();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ watching: watchedSession || 'auto' }));
+    } else if (req.method === 'GET' && parsed.pathname === '/sessions') {
+        const list = Object.entries(sessions).map(([id, s]) => ({
+            id: id.substring(0, 8),
+            lines: s.lines.length,
+            lastActivity: new Date(s.lastActivity).toLocaleTimeString(),
+            currentTool: s.currentTool,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(list));
     } else {
         res.writeHead(404);
         res.end('Not found');
@@ -309,3 +340,14 @@ const httpServer = http.createServer((req, res) => {
 httpServer.listen(HTTP_PORT, () => {
     console.log('HTTP hook receiver on :' + HTTP_PORT);
 });
+
+// Cleanup stale sessions (>1h inactive)
+setInterval(() => {
+    const cutoff = Date.now() - 3600000;
+    for (const [id, s] of Object.entries(sessions)) {
+        if (s.lastActivity < cutoff) {
+            delete sessions[id];
+            if (watchedSession === id) watchedSession = null;
+        }
+    }
+}, 60000);
