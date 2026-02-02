@@ -374,6 +374,20 @@ httpServer.listen(HTTP_PORT, () => {
     console.log('HTTP hook receiver on :' + HTTP_PORT);
 });
 
+// Poll transcript for new assistant text every 2s
+// Catches text that arrives after the last tool call
+setInterval(() => {
+    for (const session of Object.values(sessions)) {
+        if (session.transcriptPath) {
+            const before = session.lines.length;
+            checkTranscript(session);
+            if (session.lines.length > before) {
+                broadcastIfActive(session);
+            }
+        }
+    }
+}, 2000);
+
 // Cleanup stale sessions (>1h inactive)
 setInterval(() => {
     const cutoff = Date.now() - 3600000;
