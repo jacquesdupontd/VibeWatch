@@ -2,12 +2,14 @@
   "name": "watchapp",
   "author": "MakeAwesomeHappen",
   "version": "1.0.0",
-  "keywords": ["pebble-app"],
+  "keywords": [
+    "pebble-app"
+  ],
   "private": true,
   "dependencies": {},
   "pebble": {
     "displayName": "watchapp",
-    "uuid": "01b2779a-f792-4ea5-9ba9-afe970d04e8e",
+    "uuid": "4c4314c9-5555-460d-9781-678440552b09",
     "sdkVersion": "3",
     "enableMultiJS": true,
     "targetPlatforms": [

@@ -71,10 +71,11 @@ function clean(str) {
         .replace(/\x1B[()][A-Z0-9]/g, '')
         .replace(/[\x00-\x08\x0E-\x1F\x7F]/g, '')
         .replace(/\r/g, '')
-        .replace(/⏺/g, '*').replace(/⎿/g, ' ').replace(/●/g, '*')
+        .replace(/⏺/g, '-').replace(/⎿/g, ' ').replace(/●/g, '-')
         .replace(/⬤/g, '*').replace(/✓/g, 'OK').replace(/✗/g, 'FAIL')
         .replace(/⚠/g, '!').replace(/❌/g, 'X').replace(/✅/g, 'OK')
         .replace(/🔍/g, '').replace(/📁/g, '')
+        .replace(/❯/g, '> ')
         .replace(/[^\x20-\x7E\n]/g, '');
 }
 
@@ -152,72 +153,82 @@ function extractClaude(raw) {
         if (/^\(timeout/.test(t)) continue;
         if (/^Cooked for/.test(t) || /^Baked for/.test(t)) continue;
         if (/^Status dialog/.test(t)) continue;
-        if (/^\/usage/.test(t) || /^\/help/.test(t) || /^\/clear/.test(t)) continue;
-        // Pure numbers (PIDs, line numbers, etc.)
-        if (/^\d+$/.test(t)) continue;
-        // Short junk (single chars, arrows, etc.)
-        if (t.length <= 2) continue;
-        // Diff code lines: "123 | code" or "123 + code"
-        if (/^\d+\s+[\|\+\-]/.test(t)) continue;
+        if (/^\/usage/.test(t) || /^\/help/.test(t) || /^\/clear/.test(t) || /^\/exit/.test(t)) continue;
+        if (/Context left/.test(t)) continue;
+        if (t.includes('───') || t.includes('━━━') || t.includes('━━')) continue;
+        if (/^(\?|\s+\?)/.test(t)) continue;
+        if (t.includes('shortcuts')) continue;
+
         // Indented tree lines from tool output
         if (/^[|L]\s/.test(t) && t.length < 20) continue;
 
-        // Shorten paths
-        const s = t.replace(/\/Users\/[^/]+\/Documents\/[^\/]+\/[^\/]+\//g, '')
-                    .replace(/\(ctrl\+o to expand\)/g, '')
-                    .trim();
-        if (!s || s.length <= 2) continue;
+        if (t.includes('───') || t.includes('━━━')) continue;
+        if (/^(\?|\s+\?)/.test(t)) continue;
+
+        // Clean ANSI and shorten paths
+        const s = clean(t)
+            .replace(/\/Users\/[^/]+\/Documents\/[^\/]+\/[^\/]+\//g, '')
+            .trim();
+        if (!s || s.length <= 1) continue;
 
         // --- Classify each line ---
 
-        // Prompts - YELLOW
-        if (/^Do you want/.test(s)) { items.push({type:'prompt', text: s}); continue; }
-        if (/^\d+\.\s*(Yes|No|Allow)/.test(s)) { items.push({type:'prompt', text: s}); continue; }
+        if (/[❯>]/.test(s) && s.length > 2) {
+            // Do NOT treat this as a suggestion automatically.
+            // Only the active ghost text detected in poll() is a suggestion.
+            // Treat history prompts as normal text/user messages.
+            // We can check if it looks like a user command:
+            items.push({ type: 'user', text: '[ME] ' + s }); continue;
+        }
 
-        // Tool use headers - CYAN
-        if (/^(Bash|Read|Edit|Write|Grep|Glob|Task|Search)\s*\(/.test(s)) {
-            items.push({type:'tool', text: '> ' + s}); continue;
+        // Tool use headers - CYAN (Hacker blue)
+        if (/^(Bash|Read|Edit|Write|Grep|Glob|Task|Search|List|View)\s*\(/.test(s)) {
+            items.push({ type: 'tool', text: '[TOOL] ' + s }); continue;
         }
 
         // Commands - CYAN
-        if (/^(cd |npm |npx |git |pebble |node |python |> |lsof )/.test(s)) {
-            items.push({type:'tool', text: s}); continue;
+        if (/^(\$ |cd |npm |npx |git |pebble |node |python |> |lsof )/.test(s)) {
+            items.push({ type: 'tool', text: s.startsWith('$') ? s : '$ ' + s }); continue;
         }
 
         // Claude bullet points (* text) - these are Claude's main messages
-        if (s.startsWith('*')) {
-            items.push({type:'claude', text: s}); continue;
+        if (s.startsWith('*') || s.startsWith('⏺')) {
+            items.push({ type: 'claude', text: s }); continue;
         }
 
         // Errors - RED
-        if (/(error|fail|exception|crash|fatal)/i.test(s) && !/(success)/i.test(s)) {
-            items.push({type:'error', text: s}); continue;
+        if (/(error|fail|exception|crash|fatal|invalid|rejected)/i.test(s) && !/(success|created)/i.test(s)) {
+            items.push({ type: 'error', text: '[X] ' + s }); continue;
         }
         // Success - GREEN
-        if (/(success|OK,|created|installed|built|compil|completed|est bon)/i.test(s)) {
-            items.push({type:'success', text: s}); continue;
+        if (/(success|OK,|created|installed|built|compil|completed|finished|passed|done)/i.test(s)) {
+            items.push({ type: 'success', text: '[OK] ' + s }); continue;
         }
         // Warnings - ORANGE
-        if (/(warning|removed|modified|deleted)/i.test(s)) {
-            items.push({type:'warning', text: s}); continue;
+        if (/(warning|removed|modified|deleted|modified|changed)/i.test(s)) {
+            items.push({ type: 'warning', text: '[!] ' + s }); continue;
         }
 
         // Diff
-        if (/^\+\s/.test(s)) { items.push({type:'diff_add', text: s}); continue; }
-        if (/^-\s/.test(s)) { items.push({type:'diff_rm', text: s}); continue; }
+        if (/^\+\s/.test(s)) { items.push({ type: 'diff_add', text: s }); continue; }
+        if (/^-\s/.test(s)) { items.push({ type: 'diff_rm', text: s }); continue; }
 
         // File paths - LIGHT GRAY
-        if (/^(src\/|\.\/|\w+\.\w+:)/.test(s) && s.length < 80) {
-            items.push({type:'file', text: s}); continue;
+        if (/^(\.\/|[a-zA-Z0-9_\-.]+\/|src\/|lib\/|app\/)/.test(s) && s.includes('/') && s.length < 60) {
+            items.push({ type: 'file', text: '[F] ' + s }); continue;
         }
 
-        // ALL CAPS = user message - distinct color
+        // Git/System Keywords - COLORED (Gold/Orange for git)
+        if (/git|ssh|fetch|push|pull|clone|commit|origin/i.test(s)) { items.push({ type: 'warning', text: s }); continue; }
+        if (/Context|Task|Step/i.test(s)) { items.push({ type: 'text', text: s }); continue; } // Keep context white/blue
+
+        // User messages (ALL CAPS or started with >)
         if (s.length > 10 && s === s.toUpperCase() && /[A-Z]{5,}/.test(s)) {
-            items.push({type:'user', text: s}); continue;
+            items.push({ type: 'user', text: '[ME] ' + s }); continue;
         }
 
         // Everything else = Claude explanation text
-        items.push({type:'text', text: s});
+        items.push({ type: 'text', text: s });
     }
 
     // Assign colors - alternate on EVERY line for claude/text
@@ -226,15 +237,16 @@ function extractClaude(raw) {
     for (const item of items) {
         let color;
         switch (item.type) {
-            case 'tool':     color = 'C'; break;
-            case 'error':    color = 'R'; break;
-            case 'success':  color = 'G'; break;
-            case 'warning':  color = 'O'; break;
-            case 'prompt':   color = 'Y'; break;
+            case 'tool': color = 'C'; break;
+            case 'error': color = 'R'; break;
+            case 'success': color = 'G'; break;
+            case 'warning': color = 'O'; break;
+            case 'prompt': color = 'Y'; break;
             case 'diff_add': color = 'G'; break;
-            case 'diff_rm':  color = 'R'; break;
-            case 'file':     color = 'L'; break;
-            case 'user':     color = 'Y'; break;
+            case 'diff_rm': color = 'R'; break;
+            case 'file': color = 'L'; break;
+            case 'user': color = 'Y'; break;
+            case 'suggestion': color = 'S'; break;
             case 'claude':
             case 'text':
             default:
@@ -259,7 +271,7 @@ try {
 }
 
 wss.on('connection', (ws) => {
-    console.log('Connected');
+    console.log('[' + new Date().toLocaleTimeString() + '] Connected');
     let lastSent = '';
     let polling = true;
 
@@ -267,72 +279,51 @@ wss.on('connection', (ws) => {
         if (!polling) return;
         try {
             const raw = execSync(
-                'tmux capture-pane -t ' + TMUX_SESSION + ' -p 2>/dev/null',
+                'tmux capture-pane -t ' + TMUX_SESSION + ' -p -e 2>/dev/null',
                 { encoding: 'utf8', timeout: 2000 }
             );
             const promptType = detectPrompt(raw);
-            const screen = extractClaude(raw);
+            let screen = extractClaude(raw); // Use 'let' because it might be modified
 
-            // Detect suggestion: find last line with ❯ or > prompt
+            // Detect suggestion: look for the "dim/ghost" ANSI sequence ([2m) on prompt lines
             let suggestion = null;
             const rawLines = raw.split('\n');
+            let finalScreenLines = screen.split('\n');
+
             for (let i = rawLines.length - 1; i >= 0; i--) {
                 const rl = rawLines[i];
-                // Skip empty and UI noise lines
-                if (!rl.trim()) continue;
-                if (/accept edits/.test(rl)) continue;
-                if (/shift\+tab/.test(rl)) continue;
-                if (/Context left/.test(rl)) continue;
-                if (/^[\s─━═]+$/.test(rl.trim())) continue;
+                // Only consider lines with a prompt symbol or that look like input
+                if (!rl.includes('❯') && !rl.includes('>')) continue;
 
-                // Check for prompt char ❯ or >
-                if (/[❯]/.test(rl) || /^\s*>\s+\S/.test(rl)) {
-                    // Check if next meaningful line is a response (means already submitted)
-                    let submitted = false;
-                    for (let j = i + 1; j < rawLines.length; j++) {
-                        const next = rawLines[j].trim();
-                        if (!next) continue;
-                        if (/[─━═]{3,}/.test(next)) continue;  // separators don't mean submitted
-                        if (/accept edits/.test(next)) continue;  // UI noise
-                        if (/shift\+tab/.test(next)) continue;
-                        // If we find Claude's response marker, it's submitted
-                        if (/[⏺]/.test(next) || /^\*/.test(next)) {
-                            submitted = true;
-                        }
-                        break;
+                // If it contains "dim/ghost" ANSI sequence ([2m), capture the entire line
+                // This ensures we get things like "oui push" even if "o" is highlighted differently
+                if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
+                    // Debounce/Stability: Only update suggestion if it's different or meaningful
+                    let newSug = clean(rl).trim();
+                    // Strip leading "> " arrow from suggestion
+                    if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
+                    if (newSug && newSug.length > 2) {
+                        suggestion = newSug;
+                        // console.log('DETECTED GHOST SUGGESTION (FULL):', suggestion);
                     }
-                    if (!submitted) {
-                        // Extract text after prompt symbol
-                        let sugText = rl.replace(/.*[❯>]\s*/, '').trim();
-                        sugText = clean(sugText).trim();
-                        if (sugText.length > 1) {
-                            suggestion = sugText;
-                            console.log('SUGGESTION:', suggestion);
+                    // Strip prompt/suggestion lines from main screen (may be split across multiple colored lines)
+                    while (finalScreenLines.length > 0) {
+                        const lastL = finalScreenLines[finalScreenLines.length - 1];
+                        if (/(\[ME\]|[❯>])/.test(lastL)) {
+                            finalScreenLines.pop();
+                        } else {
+                            break;
                         }
                     }
                 }
-                break;  // only check the last non-noise line
+                break; // Only check the active prompt line
             }
+            screen = finalScreenLines.join('\n');
 
-            // Remove suggestion text from screen content to avoid duplicate
-            let finalScreen = screen;
-            if (suggestion) {
-                const lines = finalScreen.split('\n');
-                // Remove last line(s) that contain the suggestion text
-                while (lines.length > 0) {
-                    const last = lines[lines.length - 1];
-                    // Strip color code prefix and check
-                    const text = last.length > 1 ? last.substring(1) : '';
-                    if (text.trim() && suggestion.includes(text.trim().substring(0, 10))) {
-                        lines.pop();
-                    } else {
-                        break;
-                    }
-                }
-                finalScreen = lines.join('\n');
-            }
+            // Reconstruct screen after potentially removing the suggestion line
+            screen = finalScreenLines.join('\n');
 
-            const msg = { type: 'output', content: finalScreen };
+            const msg = { type: 'output', content: screen }; // Use the potentially modified 'screen'
             if (promptType) msg.prompt = promptType;
             if (suggestion) msg.suggestion = suggestion;
 
@@ -345,7 +336,7 @@ wss.on('connection', (ws) => {
                 }
                 lastSent = msgStr;
             }
-        } catch {}
+        } catch { }
     }, POLL_MS);
 
     ws.on('message', (msg) => {
@@ -360,7 +351,7 @@ wss.on('connection', (ws) => {
             } else if (data.type === 'key') {
                 execSync('tmux send-keys -t ' + TMUX_SESSION + ' "' + data.content + '"');
             }
-        } catch {}
+        } catch { }
     });
 
     ws.on('close', () => { polling = false; clearInterval(poll); console.log('Disconnected'); });

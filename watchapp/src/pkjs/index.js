@@ -41,7 +41,7 @@ Pebble.addEventListener('ready', function() {
             }
             // Append suggestion as last line with 'S' color code
             if (msg.suggestion) {
-                content += "\nS> " + msg.suggestion;
+                content += "\nS" + msg.suggestion;
                 payload["TERMINAL_DATA"] = content;
             }
             pending = payload;
