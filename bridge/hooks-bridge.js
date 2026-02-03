@@ -24,10 +24,20 @@ function getSession(id) {
 
 // Check transcript for new assistant text
 function checkTranscript(session) {
-    if (!session.transcriptPath || !fs.existsSync(session.transcriptPath)) return;
+    if (!session.transcriptPath) {
+        // console.log('No transcript path for session');
+        return;
+    }
+    if (!fs.existsSync(session.transcriptPath)) {
+        console.log('Transcript not found:', session.transcriptPath);
+        return;
+    }
     try {
         const allLines = fs.readFileSync(session.transcriptPath, 'utf8').trim().split('\n');
         const startFrom = session.lastTranscriptLine;
+        if (allLines.length > startFrom) {
+            console.log('Reading transcript lines', startFrom, 'to', allLines.length);
+        }
         session.lastTranscriptLine = allLines.length;
         for (let i = startFrom; i < allLines.length; i++) {
             try {
@@ -36,6 +46,7 @@ function checkTranscript(session) {
                     const texts = entry.message.content.filter(c => c.type === 'text');
                     for (const t of texts) {
                         if (!t.text || t.text.trim().length < 3) continue;
+                        console.log('Found assistant text:', t.text.substring(0, 50));
                         // Show each sentence/paragraph, trimmed for watch
                         const clean = t.text.replace(/\n+/g, ' ').trim();
                         // Split into sentences, show each
@@ -50,7 +61,9 @@ function checkTranscript(session) {
                 }
             } catch {}
         }
-    } catch {}
+    } catch (e) {
+        console.log('Transcript read error:', e.message);
+    }
 }
 
 // Auto-select: most recently active session
@@ -183,8 +196,17 @@ function handleEvent(event) {
     const session = getSession(sessionId);
     const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit' });
 
-    // Track transcript path and check for new assistant text
-    if (event.transcript_path) session.transcriptPath = event.transcript_path;
+    // Track transcript path
+    if (event.transcript_path && !session.transcriptPath) {
+        session.transcriptPath = event.transcript_path;
+        // Initialize to current transcript length to skip history
+        try {
+            const lines = fs.readFileSync(event.transcript_path, 'utf8').trim().split('\n');
+            session.lastTranscriptLine = lines.length;
+            console.log('Initialized transcript at line', session.lastTranscriptLine);
+        } catch {}
+    }
+    // Check for new assistant text since last read
     checkTranscript(session);
 
     switch (hookName) {
