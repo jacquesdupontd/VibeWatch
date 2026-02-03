@@ -28,16 +28,53 @@ function listTmuxSessions(callback) {
     });
 }
 
+// Project directory for new sessions
+const PROJECT_BASE = process.env.HOME + '/PebbleVibeProjects';
+
+// Get next available project directory (NewProject, NewProject2, etc.)
+function getNextProjectDir() {
+    const fs = require('fs');
+    const path = require('path');
+
+    // Ensure base dir exists
+    if (!fs.existsSync(PROJECT_BASE)) {
+        fs.mkdirSync(PROJECT_BASE, { recursive: true });
+    }
+
+    let name = 'NewProject';
+    let i = 1;
+    while (fs.existsSync(path.join(PROJECT_BASE, name))) {
+        i++;
+        name = 'NewProject' + i;
+    }
+
+    const dir = path.join(PROJECT_BASE, name);
+    fs.mkdirSync(dir, { recursive: true });
+    return { dir, name };
+}
+
 // Create new tmux session with Claude
 function createTmuxSession(sessionName, callback) {
-    const name = sessionName || 'vibe-' + Date.now().toString(36);
-    // Create detached session running Claude
-    exec(`tmux new-session -d -s "${name}" "claude"`, (err) => {
+    const { dir, name } = sessionName ?
+        { dir: PROJECT_BASE + '/' + sessionName, name: sessionName } :
+        getNextProjectDir();
+
+    // Ensure directory exists
+    const fs = require('fs');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // Create detached session running Claude in the project dir
+    const cmd = `tmux new-session -d -s "${name}" -c "${dir}" "cd '${dir}' && claude"`;
+    console.log('Creating session:', cmd);
+
+    exec(cmd, (err) => {
         if (err) {
             console.log('Failed to create tmux session:', err.message);
             callback(null, err.message);
         } else {
-            console.log('Created tmux session:', name);
+            console.log('Created tmux session:', name, 'in', dir);
             callback(name, null);
         }
     });

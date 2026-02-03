@@ -1,12 +1,68 @@
+// ===========================================
+// CONFIGURATION
+// ===========================================
+
+var CONFIG = {
+    host: 'macbook-pro',
+    port: 8080,
+    project_dir: '~/PebbleVibeProjects'
+};
+
+// Load saved config
+try {
+    var saved = localStorage.getItem('vibecoder_config');
+    if (saved) {
+        var parsed = JSON.parse(saved);
+        CONFIG.host = parsed.host || CONFIG.host;
+        CONFIG.port = parsed.port || CONFIG.port;
+        CONFIG.project_dir = parsed.project_dir || CONFIG.project_dir;
+    }
+} catch (e) {
+    console.log("Config load error:", e);
+}
+
+// Configuration page handler
+Pebble.addEventListener('showConfiguration', function() {
+    var url = 'https://jacquesdupontd.github.io/vibecoder/docs/config.html';
+    url += '?host=' + encodeURIComponent(CONFIG.host);
+    url += '&port=' + encodeURIComponent(CONFIG.port);
+    url += '&project_dir=' + encodeURIComponent(CONFIG.project_dir);
+    console.log("Opening config:", url);
+    Pebble.openURL(url);
+});
+
+Pebble.addEventListener('webviewclosed', function(e) {
+    if (e.response && e.response.length > 0) {
+        try {
+            var newConfig = JSON.parse(decodeURIComponent(e.response));
+            CONFIG.host = newConfig.host || CONFIG.host;
+            CONFIG.port = newConfig.port || CONFIG.port;
+            CONFIG.project_dir = newConfig.project_dir || CONFIG.project_dir;
+            localStorage.setItem('vibecoder_config', JSON.stringify(CONFIG));
+            console.log("Config saved:", JSON.stringify(CONFIG));
+            // Reconnect with new config
+            if (ws) ws.close();
+        } catch (err) {
+            console.log("Config parse error:", err);
+        }
+    }
+});
+
+// ===========================================
+// MAIN APP
+// ===========================================
+
 Pebble.addEventListener('ready', function() {
-    console.log("VibeCoder ready");
+    console.log("VibeCoder ready - connecting to " + CONFIG.host + ":" + CONFIG.port);
     var ws = null;
     var sending = false;
     var pending = null;
     var reconnectTimer = null;
 
     function connect() {
-        ws = new WebSocket('ws://localhost:8080');
+        var wsUrl = 'ws://' + CONFIG.host + ':' + CONFIG.port;
+        console.log("Connecting to:", wsUrl);
+        ws = new WebSocket(wsUrl);
 
         ws.onopen = function() {
             console.log("Bridge OK");
