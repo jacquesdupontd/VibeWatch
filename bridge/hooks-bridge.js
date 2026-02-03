@@ -122,9 +122,25 @@ function addLine(session, color, text) {
     broadcastIfActive(session);
 }
 
+// Color codes for watch:
+// W = White (Claude text)
+// Y = Yellow (user prompts)
+// C = Cyan (tool calls)
+// G = Green (success/done)
+// R = Red (errors)
+// O = Orange (warnings/permissions)
+// L = LightGray (meta info)
+// B = Blue (file paths)
+// M = Magenta (special)
+// P = Pink (assistant thinking)
+
 function broadcastIfActive(session) {
     const activeId = activeSessionId();
-    if (!activeId || sessions[activeId] !== session) return;
+    if (!activeId || sessions[activeId] !== session) {
+        console.log('Skip broadcast: activeId=', activeId, 'match=', sessions[activeId] === session);
+        return;
+    }
+    console.log('Broadcasting to watch, lines:', session.lines.length);
     broadcastScreen();
 }
 
@@ -229,15 +245,18 @@ function handleEvent(event) {
             const name = event.tool_name || '?';
             const detail = formatToolStart(name, event.tool_input || {});
             session.currentTool = name;
+            // Color by tool type
+            let color = 'C';  // Default cyan for tools
             let icon = '$';
-            if (name === 'Read') icon = 'R';
-            else if (name === 'Edit') icon = 'E';
-            else if (name === 'Write') icon = 'W';
-            else if (name === 'Bash') icon = '$';
-            else if (name === 'Grep' || name === 'Glob') icon = '?';
-            else if (name === 'Task') icon = 'T';
+            if (name === 'Read') { icon = 'R'; color = 'B'; }        // Blue for reads
+            else if (name === 'Edit') { icon = 'E'; color = 'M'; }   // Magenta for edits
+            else if (name === 'Write') { icon = 'W'; color = 'M'; }  // Magenta for writes
+            else if (name === 'Bash') { icon = '$'; color = 'C'; }   // Cyan for bash
+            else if (name === 'Grep' || name === 'Glob') { icon = '?'; color = 'B'; }
+            else if (name === 'Task') { icon = 'T'; color = 'P'; }   // Pink for tasks
+            else if (name === 'WebFetch' || name === 'WebSearch') { icon = 'W'; color = 'O'; }
             else icon = name.charAt(0);
-            addLine(session, 'C', '[' + icon + '] ' + detail);
+            addLine(session, color, '[' + icon + '] ' + detail);
             break;
         }
 

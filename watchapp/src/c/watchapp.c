@@ -38,49 +38,33 @@ static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
 static GColor color_from_code(char c) {
   if (s_dark_mode) {
     switch (c) {
-    case 'W':
-      return GColorWhite;
-    case 'B':
-      return GColorCyan; // Brighter blue
-    case 'C':
-      return GColorCeleste; // Brighter cyan
-    case 'R':
-      return GColorMelon; // Brighter red
-    case 'G':
-      return GColorGreen; // Brighter green
-    case 'Y':
-      return GColorYellow;
-    case 'O':
-      return GColorChromeYellow; // Brighter orange
-    case 'L':
-      return GColorLightGray;
-    case 'S':
-      return GColorWhite; // Suggestion default
-    default:
-      return GColorWhite;
+    case 'W': return GColorWhite;           // Claude text
+    case 'Y': return GColorYellow;          // User prompts - bright yellow
+    case 'C': return GColorCyan;            // Tool calls - cyan
+    case 'G': return GColorMalachite;       // Success - bright green
+    case 'R': return GColorRed;             // Errors - pure red
+    case 'O': return GColorOrange;          // Warnings - orange
+    case 'L': return GColorLightGray;       // Meta info
+    case 'B': return GColorVividCerulean;   // File paths - blue
+    case 'M': return GColorMagenta;         // Special
+    case 'P': return GColorShockingPink;    // Assistant thinking
+    case 'S': return GColorWhite;           // Suggestion
+    default:  return GColorWhite;
     }
   } else {
     switch (c) {
-    case 'W':
-      return GColorBlack;
-    case 'B':
-      return GColorCobaltBlue;
-    case 'C':
-      return GColorBlueMoon;
-    case 'R':
-      return GColorBulgarianRose;
-    case 'G':
-      return GColorDarkGreen;
-    case 'Y':
-      return GColorWindsorTan;
-    case 'O':
-      return GColorOrange;
-    case 'L':
-      return GColorDarkGray;
-    case 'S':
-      return GColorDarkGray;
-    default:
-      return GColorBlack;
+    case 'W': return GColorBlack;
+    case 'Y': return GColorOrange;
+    case 'C': return GColorCobaltBlue;
+    case 'G': return GColorIslamicGreen;
+    case 'R': return GColorDarkCandyAppleRed;
+    case 'O': return GColorWindsorTan;
+    case 'L': return GColorDarkGray;
+    case 'B': return GColorDukeBlue;
+    case 'M': return GColorPurple;
+    case 'P': return GColorFashionMagenta;
+    case 'S': return GColorDarkGray;
+    default:  return GColorBlack;
     }
   }
 }
