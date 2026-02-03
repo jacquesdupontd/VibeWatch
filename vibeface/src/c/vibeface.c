@@ -114,6 +114,62 @@ static const char *WORK_WORDS[] = {"focus", "build", "create", "ship it", "grind
 static const char *EVENING_WORDS[] = {"done", "relax", "chill", "unwind", "vibe"};
 static const char *WEEKEND_WORDS[] = {"freedom", "party", "enjoy", "lazy", "fun"};
 
+// CODE WORDS - programming terms
+static const char *CODE_WORDS[] = {
+    "function", "return", "import", "export", "async",
+    "await", "const", "let", "var", "class",
+    "if else", "while", "for loop", "switch", "break",
+    "try catch", "throw", "null", "undefined", "true",
+    "false", "array", "object", "string", "int",
+    "void", "static", "public", "private", "new",
+    "this", "self", "super", "extends", "implements",
+    "interface", "enum", "struct", "typedef", "sizeof",
+    "malloc", "free", "pointer", "*ptr", "&ref",
+    "git push", "git pull", "npm install", "pip", "cargo",
+};
+static const int NUM_CODE_WORDS = 45;
+
+// CODE SNIPPETS - actual code fragments
+static const char *CODE_SNIPPETS[] = {
+    // Python
+    "print()", "def main():", "if __name__", "import os",
+    "for i in", "while True:", "return None", "lambda x:",
+    // JavaScript
+    "() => {}", "console.log", "require()", "module.exports",
+    "Promise", ".then()", ".catch()", "async/await",
+    // C
+    "int main()", "#include", "printf()", "return 0;",
+    "void *ptr", "sizeof()", "malloc()", "free()",
+    // General
+    "// TODO", "/* ... */", "#!/bin/bash", "sudo rm",
+    "curl -X", "docker run", "npm start", "python3",
+};
+static const int NUM_CODE_SNIPPETS = 32;
+
+// META SNIPPETS - actual VibeFace code showing on VibeFace!
+static const char *META_SNIPPETS[] = {
+    "s_chaos_level",
+    "GColorWhite",
+    "rand() % 10",
+    "layer_mark_dirty",
+    "app_timer",
+    "strncpy()",
+    "GRect bounds",
+    "window_create",
+    "graphics_draw",
+    "tick_handler",
+    "s_glitch_color",
+    "FONT_KEY_",
+    "#include <pebble.h>",
+    "static void",
+    "s_display_text",
+    "get_random_color()",
+    "update_strings()",
+    "canvas_update_proc",
+    "s_cursor_visible",
+    "GColorMagenta",
+};
+
 // Check for special times (easter eggs)
 static void check_special_time() {
     s_is_special_time = false;
@@ -507,12 +563,12 @@ static void glitch_tick(void *context) {
     // Update text shake during glitch
     update_text_shake();
 
-    // Flash meaningful words during glitch - MORE variety
+    // Flash meaningful words during glitch - MEGA variety
     // Change words more frequently (every 3 ticks instead of 5)
     if (s_glitch_counter % 3 == 0) {
-        int word_choice = rand() % 10;
+        int word_choice = rand() % 20;
         if (word_choice < 3) {
-            // 30%: Context-aware word based on time of day / weekend
+            // 15%: Context-aware word based on time of day / weekend
             bool is_weekend = (s_current_day == 0 || s_current_day == 6);
             if (is_weekend) {
                 strncpy(s_display_text, WEEKEND_WORDS[rand() % 5], sizeof(s_display_text));
@@ -525,10 +581,19 @@ static void glitch_tick(void *context) {
                 }
             }
         } else if (word_choice < 5) {
-            // 20%: Generic glitch word
+            // 10%: Generic glitch word
             strncpy(s_display_text, GLITCH_WORDS[rand() % NUM_GLITCH_WORDS], sizeof(s_display_text));
+        } else if (word_choice < 8) {
+            // 15%: CODE WORDS (function, return, async, etc.)
+            strncpy(s_display_text, CODE_WORDS[rand() % NUM_CODE_WORDS], sizeof(s_display_text));
+        } else if (word_choice < 11) {
+            // 15%: CODE SNIPPETS (print(), def main():, etc.)
+            strncpy(s_display_text, CODE_SNIPPETS[rand() % NUM_CODE_SNIPPETS], sizeof(s_display_text));
+        } else if (word_choice < 13) {
+            // 10%: META SNIPPETS - VibeFace code on VibeFace!
+            strncpy(s_display_text, META_SNIPPETS[rand() % 20], sizeof(s_display_text));
         } else {
-            // 50%: Keep vibecode (still recognizable but more variety)
+            // 35%: Keep vibecode (still recognizable but more variety)
             strncpy(s_display_text, VIBECODE, sizeof(s_display_text));
         }
     }
