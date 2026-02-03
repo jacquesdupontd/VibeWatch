@@ -1,232 +1,102 @@
-// ===========================================
-// CONFIGURATION
-// ===========================================
-
-var CONFIG = {
-    host: 'macbook-pro',
-    port: 8080,
-    project_dir: '~/PebbleVibeProjects'
-};
-
-// Load saved config
-try {
-    var saved = localStorage.getItem('vibecoder_config');
-    if (saved) {
-        var parsed = JSON.parse(saved);
-        CONFIG.host = parsed.host || CONFIG.host;
-        CONFIG.port = parsed.port || CONFIG.port;
-        CONFIG.project_dir = parsed.project_dir || CONFIG.project_dir;
-    }
-} catch (e) {
-    console.log("Config load error:", e);
-}
-
-// Configuration page handler
-Pebble.addEventListener('showConfiguration', function() {
-    var url = 'https://jacquesdupontd.github.io/vibecoder/docs/config.html';
-    url += '?host=' + encodeURIComponent(CONFIG.host);
-    url += '&port=' + encodeURIComponent(CONFIG.port);
-    url += '&project_dir=' + encodeURIComponent(CONFIG.project_dir);
-    console.log("Opening config:", url);
-    Pebble.openURL(url);
-});
-
-Pebble.addEventListener('webviewclosed', function(e) {
-    if (e.response && e.response.length > 0) {
-        try {
-            var newConfig = JSON.parse(decodeURIComponent(e.response));
-            CONFIG.host = newConfig.host || CONFIG.host;
-            CONFIG.port = newConfig.port || CONFIG.port;
-            CONFIG.project_dir = newConfig.project_dir || CONFIG.project_dir;
-            localStorage.setItem('vibecoder_config', JSON.stringify(CONFIG));
-            console.log("Config saved:", JSON.stringify(CONFIG));
-            // Reconnect with new config
-            if (ws) ws.close();
-        } catch (err) {
-            console.log("Config parse error:", err);
-        }
-    }
-});
-
-// ===========================================
-// MAIN APP
-// ===========================================
-
 Pebble.addEventListener('ready', function() {
-    console.log("VibeCoder ready - connecting to " + CONFIG.host + ":" + CONFIG.port);
-    var ws = null;
+    console.log("VibeCoder ready");
+    var ws = new WebSocket('ws://localhost:8080');
     var sending = false;
     var pending = null;
-    var reconnectTimer = null;
 
-    function connect() {
-        var wsUrl = 'ws://' + CONFIG.host + ':' + CONFIG.port;
-        console.log("Connecting to:", wsUrl);
-        ws = new WebSocket(wsUrl);
+    ws.onopen = function() {
+        console.log("Bridge OK");
+        // Request session list on connect
+        ws.send(JSON.stringify({ type: 'list' }));
+    };
 
-        ws.onopen = function() {
-            console.log("Bridge OK");
-            // Request session list on connect
-            ws.send(JSON.stringify({ type: 'list_tmux' }));
-        };
+    ws.onclose = function() {
+        console.log("Bridge lost, retry 3s");
+        setTimeout(function() { ws = new WebSocket('ws://localhost:8080'); }, 3000);
+    };
 
-        ws.onclose = function() {
-            console.log("Bridge lost, retry 3s");
-            if (reconnectTimer) clearTimeout(reconnectTimer);
-            reconnectTimer = setTimeout(connect, 3000);
-        };
+    ws.onmessage = function(e) {
+        var msg = JSON.parse(e.data);
+        console.log("Bridge msg: " + msg.type);
 
-        ws.onerror = function(e) {
-            console.log("WS error:", e.message);
-        };
+        if (msg.type === 'menu') {
+            // Send menu to watch: MENU:session1,session2,...
+            var sessions = msg.sessions || [];
+            pending = { "TERMINAL_DATA": "MENU:" + sessions.join(",") };
+            trySend();
+        }
+        else if (msg.type === 'session_joined' || msg.type === 'session_created') {
+            // Send session name to watch
+            pending = { "TERMINAL_DATA": "SESSION:" + msg.name };
+            trySend();
+        }
+        else if (msg.type === 'output') {
+            var content = msg.content;
+            if (content.length > 1900) content = content.substring(content.length - 1900);
+            var nl = content.indexOf('\n');
+            if (nl >= 0 && nl < 50) content = content.substring(nl + 1);
+            var payload = { "TERMINAL_DATA": content };
 
-        ws.onmessage = function(e) {
-            var msg = JSON.parse(e.data);
-            console.log("Bridge msg type:", msg.type);
-
-            // ===========================================
-            // SESSION MANAGEMENT MESSAGES
-            // ===========================================
-
-            if (msg.type === 'session_list') {
-                // Send session list to watch
-                var content = "C> VibeCoder\n";
-                if (msg.hasActive) {
-                    content += "GActive session\n";
+            if (msg.prompt && msg.prompt.options) {
+                var opts = msg.prompt.options;
+                payload["PROMPT_FLAG"] = 1;
+                var parts = [];
+                var nums = [];
+                if (opts.length === 2) {
+                    parts.push("^ " + opts[0].label);
+                    parts.push("v " + opts[1].label);
+                    nums = [opts[0].num, 0, opts[1].num];
                 } else {
-                    content += "LNo active session\n";
+                    parts.push("^ " + opts[0].label);
+                    if (opts[1]) parts.push("o " + opts[1].label);
+                    if (opts[2]) parts.push("v " + opts[2].label);
+                    nums = [opts[0].num, opts[1] ? opts[1].num : 0, opts[2] ? opts[2].num : 0];
                 }
-                content += "L---\n";
+                payload["PROMPT_TEXT"] = nums.join(",") + "|" + parts.join("  ");
+            }
 
-                // List tmux sessions
-                if (msg.tmux && msg.tmux.length > 0) {
-                    content += "CTmux sessions:\n";
-                    msg.tmux.forEach(function(s, i) {
-                        var status = s.attached ? " [*]" : "";
-                        content += "W" + (i + 1) + ". " + s.name + status + "\n";
-                    });
-                } else {
-                    content += "LNo tmux sessions\n";
-                }
-
-                // Show options
-                content += "L---\n";
-                content += "Y^ Create new\n";
-                content += "Yo Refresh\n";
-                content += "Yv Join session";
-
-                var payload = {
-                    "TERMINAL_DATA": content,
-                    "PROMPT_FLAG": 1,
-                    "PROMPT_TEXT": "1,2,3|^ New  o List  v Join"
-                };
-                pending = payload;
-                trySend();
+            if (msg.suggestion) {
+                content += "\nS" + msg.suggestion;
+                payload["TERMINAL_DATA"] = content;
             }
-            else if (msg.type === 'session_created') {
-                var content = "G> Session created\n";
-                content += "C" + msg.name + "\n";
-                content += "WClaude is starting...\n";
-                content += "LWaiting for hooks...";
-                pending = { "TERMINAL_DATA": content };
-                trySend();
-            }
-            else if (msg.type === 'session_joined') {
-                var content = "G> Joined session\n";
-                content += "C" + msg.name + "\n";
-                content += "WConnected!";
-                pending = { "TERMINAL_DATA": content };
-                trySend();
-            }
-            else if (msg.type === 'error') {
-                var content = "R> Error\n";
-                content += "R" + msg.message;
-                pending = { "TERMINAL_DATA": content };
-                trySend();
-            }
-            // ===========================================
-            // EXISTING OUTPUT HANDLING
-            // ===========================================
-            else if (msg.type === 'output') {
-                var content = msg.content;
-                if (content.length > 1900) content = content.substring(content.length - 1900);
-                // Cut to next full line to keep color codes intact
-                var nl = content.indexOf('\n');
-                if (nl >= 0 && nl < 50) content = content.substring(nl + 1);
-                var payload = { "TERMINAL_DATA": content };
-                if (msg.prompt && msg.prompt.options) {
-                    var opts = msg.prompt.options;
-                    payload["PROMPT_FLAG"] = 1;
-                    // Build prompt bar text: map to UP/SELECT/DOWN buttons
-                    var parts = [];
-                    var nums = [];
-                    if (opts.length === 2) {
-                        parts.push("^ " + opts[0].label);
-                        parts.push("v " + opts[1].label);
-                        nums = [opts[0].num, 0, opts[1].num];
-                    } else {
-                        parts.push("^ " + opts[0].label);
-                        if (opts[1]) parts.push("o " + opts[1].label);
-                        if (opts[2]) parts.push("v " + opts[2].label);
-                        nums = [opts[0].num, opts[1] ? opts[1].num : 0, opts[2] ? opts[2].num : 0];
-                    }
-                    // Format: "up,sel,down|display text"
-                    payload["PROMPT_TEXT"] = nums.join(",") + "|" + parts.join("  ");
-                    console.log("PROMPT: " + payload["PROMPT_TEXT"]);
-                }
-                // Append suggestion as last line with 'S' color code
-                if (msg.suggestion) {
-                    content += "\nS" + msg.suggestion;
-                    payload["TERMINAL_DATA"] = content;
-                }
-                pending = payload;
-                trySend();
-            }
-        };
-    }
-
-    // Start connection
-    connect();
+            pending = payload;
+            trySend();
+        }
+    };
 
     function trySend() {
         if (sending || !pending) return;
         var payload = pending;
         pending = null;
         sending = true;
-        console.log("Sending " + payload["TERMINAL_DATA"].length + " bytes");
         Pebble.sendAppMessage(payload,
-            function() { sending = false; console.log("Send OK"); trySend(); },
-            function(e) { sending = false; console.log("Send FAIL: " + JSON.stringify(e)); setTimeout(trySend, 300); }
+            function() { sending = false; trySend(); },
+            function(e) { sending = false; setTimeout(trySend, 300); }
         );
     }
 
-    // Receive button presses from watch
     Pebble.addEventListener('appmessage', function(e) {
         var key = e.payload["TERMINAL_DATA"];
-        if (key && ws && ws.readyState === 1) {
-            console.log("Button: " + key);
+        if (!key || !ws || ws.readyState !== 1) return;
+        console.log("Watch: " + key);
 
-            // ===========================================
-            // SESSION MANAGEMENT COMMANDS
-            // ===========================================
-            if (key === "create_session") {
-                ws.send(JSON.stringify({ type: 'create_session' }));
-            }
-            else if (key === "list_sessions") {
-                ws.send(JSON.stringify({ type: 'list_tmux' }));
-            }
-            else if (key.startsWith("join:")) {
-                var sessionName = key.substring(5);
-                ws.send(JSON.stringify({ type: 'join_session', name: sessionName }));
-            }
-            // ===========================================
-            // EXISTING COMMANDS
-            // ===========================================
-            else if (key === "accept") {
-                ws.send(JSON.stringify({ type: 'accept' }));
-            } else {
-                ws.send(JSON.stringify({ type: 'key', content: key }));
-            }
+        if (key === "list") {
+            ws.send(JSON.stringify({ type: 'list' }));
+        }
+        else if (key === "create") {
+            ws.send(JSON.stringify({ type: 'create' }));
+        }
+        else if (key === "leave") {
+            ws.send(JSON.stringify({ type: 'leave' }));
+        }
+        else if (key.indexOf("join:") === 0) {
+            ws.send(JSON.stringify({ type: 'join', name: key.substring(5) }));
+        }
+        else if (key === "accept") {
+            ws.send(JSON.stringify({ type: 'accept' }));
+        }
+        else {
+            ws.send(JSON.stringify({ type: 'key', content: key }));
         }
     });
 });

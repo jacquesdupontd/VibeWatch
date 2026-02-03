@@ -13,6 +13,14 @@ static bool s_dark_mode = true;
 static char s_prompt_text[64];
 static int s_prompt_keys[3] = {1, 2, 3};
 
+// Menu state
+typedef enum { STATE_MENU, STATE_SESSION } AppState;
+static AppState s_state = STATE_MENU;
+static char s_sessions[5][32];
+static int s_session_count = 0;
+static int s_selected_idx = 0;
+static char s_active_session[32] = "";
+
 // Streaming: character count
 static int s_chars_shown = 0;
 static int s_chars_total = 0;
@@ -32,43 +40,55 @@ static int s_line_h = 0;
 static int s_space_w = 0;
 static int s_page_step = 168;
 
-// Session management state
-static bool s_in_session_menu = true;  // Start in menu mode
-static char s_selected_session[32] = "";
-
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
 
 static GColor color_from_code(char c) {
   if (s_dark_mode) {
     switch (c) {
-    case 'W': return GColorWhite;           // Claude text
-    case 'Y': return GColorYellow;          // User prompts - bright yellow
-    case 'C': return GColorCyan;            // Tool calls - cyan
-    case 'G': return GColorMalachite;       // Success - bright green
-    case 'R': return GColorRed;             // Errors - pure red
-    case 'O': return GColorOrange;          // Warnings - orange
-    case 'L': return GColorLightGray;       // Meta info
-    case 'B': return GColorVividCerulean;   // File paths - blue
-    case 'M': return GColorMagenta;         // Special
-    case 'P': return GColorShockingPink;    // Assistant thinking
-    case 'S': return GColorWhite;           // Suggestion
-    default:  return GColorWhite;
+    case 'W':
+      return GColorWhite;
+    case 'B':
+      return GColorCyan; // Brighter blue
+    case 'C':
+      return GColorCeleste; // Brighter cyan
+    case 'R':
+      return GColorMelon; // Brighter red
+    case 'G':
+      return GColorGreen; // Brighter green
+    case 'Y':
+      return GColorYellow;
+    case 'O':
+      return GColorChromeYellow; // Brighter orange
+    case 'L':
+      return GColorLightGray;
+    case 'S':
+      return GColorWhite; // Suggestion default
+    default:
+      return GColorWhite;
     }
   } else {
     switch (c) {
-    case 'W': return GColorBlack;
-    case 'Y': return GColorOrange;
-    case 'C': return GColorCobaltBlue;
-    case 'G': return GColorIslamicGreen;
-    case 'R': return GColorDarkCandyAppleRed;
-    case 'O': return GColorWindsorTan;
-    case 'L': return GColorDarkGray;
-    case 'B': return GColorDukeBlue;
-    case 'M': return GColorPurple;
-    case 'P': return GColorFashionMagenta;
-    case 'S': return GColorDarkGray;
-    default:  return GColorBlack;
+    case 'W':
+      return GColorBlack;
+    case 'B':
+      return GColorCobaltBlue;
+    case 'C':
+      return GColorBlueMoon;
+    case 'R':
+      return GColorBulgarianRose;
+    case 'G':
+      return GColorDarkGreen;
+    case 'Y':
+      return GColorWindsorTan;
+    case 'O':
+      return GColorOrange;
+    case 'L':
+      return GColorDarkGray;
+    case 'S':
+      return GColorDarkGray;
+    default:
+      return GColorBlack;
     }
   }
 }
@@ -305,8 +325,67 @@ done:
   return y + s_line_h + ((mode > 0) ? s_scroll_offset : 4);
 }
 
+static void draw_menu(GContext *ctx, GRect bounds) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  int y = 5;
+
+  // Title
+  graphics_context_set_text_color(ctx, GColorCyan);
+  graphics_draw_text(ctx, "VibeCoder", font,
+      GRect(0, y, bounds.size.w, 22), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  y += 24;
+
+  // Hint
+  graphics_context_set_text_color(ctx, GColorDarkGray);
+  graphics_draw_text(ctx, "UP/DN nav | SEL join", small,
+      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  y += 16;
+
+  // Sessions
+  if (s_session_count > 0) {
+    for (int i = 0; i < s_session_count && i < 5; i++) {
+      if (i == s_selected_idx) {
+        graphics_context_set_fill_color(ctx, GColorDarkGray);
+        graphics_fill_rect(ctx, GRect(2, y, bounds.size.w - 4, 18), 0, GCornerNone);
+        graphics_context_set_text_color(ctx, GColorWhite);
+      } else {
+        graphics_context_set_text_color(ctx, GColorLightGray);
+      }
+      graphics_draw_text(ctx, s_sessions[i], small,
+          GRect(8, y, bounds.size.w - 16, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      y += 18;
+    }
+  } else {
+    graphics_context_set_text_color(ctx, GColorDarkGray);
+    graphics_draw_text(ctx, "No sessions", small,
+        GRect(4, y, bounds.size.w - 8, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
+
+  // Bottom hints
+  y = bounds.size.h - 32;
+  graphics_context_set_text_color(ctx, GColorMintGreen);
+  graphics_draw_text(ctx, "Long UP = New session", small,
+      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  y += 14;
+  graphics_context_set_text_color(ctx, GColorIcterine);
+  graphics_draw_text(ctx, "Long DN = Refresh", small,
+      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
 static void canvas_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
+
+  // Menu mode
+  if (s_state == STATE_MENU) {
+    draw_menu(ctx, bounds);
+    return;
+  }
+
+  // Session mode
   graphics_context_set_fill_color(ctx, bg_color());
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   if (s_buffer[0] == '\0')
@@ -402,17 +481,46 @@ static void inbox_received_callback(DictionaryIterator *iterator,
 
   Tuple *t = dict_find(iterator, MESSAGE_KEY_TERMINAL_DATA);
   if (t) {
-    // Detect if this is session menu content
-    if (strstr(t->value->cstring, "VibeCoder") != NULL &&
-        strstr(t->value->cstring, "session") != NULL) {
-      s_in_session_menu = true;
-    } else if (strstr(t->value->cstring, "Session") != NULL ||
-               strstr(t->value->cstring, "[") != NULL) {
-      // Active session content (has tool markers like [E], [$], etc.)
-      s_in_session_menu = false;
+    const char *data = t->value->cstring;
+
+    // MENU:session1,session2,...
+    if (strncmp(data, "MENU:", 5) == 0) {
+      s_session_count = 0;
+      const char *p = data + 5;
+      while (*p && s_session_count < 5) {
+        const char *comma = strchr(p, ',');
+        int len = comma ? (int)(comma - p) : (int)strlen(p);
+        if (len > 31) len = 31;
+        if (len > 0) {
+          memcpy(s_sessions[s_session_count], p, len);
+          s_sessions[s_session_count][len] = '\0';
+          s_session_count++;
+        }
+        if (comma) p = comma + 1;
+        else break;
+      }
+      s_state = STATE_MENU;
+      s_selected_idx = 0;
+      layer_mark_dirty(s_canvas);
+      return;
     }
+
+    // SESSION:name - joined a session
+    if (strncmp(data, "SESSION:", 8) == 0) {
+      strncpy(s_active_session, data + 8, sizeof(s_active_session) - 1);
+      s_state = STATE_SESSION;
+      s_buffer[0] = '\0';
+      s_chars_shown = 0;
+      s_chars_total = 0;
+      layer_mark_dirty(s_canvas);
+      return;
+    }
+
+    // Regular output - only in session mode
+    if (s_state != STATE_SESSION) return;
+
     memcpy(s_prev_buffer, s_buffer, sizeof(s_prev_buffer));
-    strncpy(s_buffer, t->value->cstring, sizeof(s_buffer) - 1);
+    strncpy(s_buffer, data, sizeof(s_buffer) - 1);
     s_buffer[sizeof(s_buffer) - 1] = '\0';
 
     // FIX: Strip trailing newlines to keep cursor inline with text
@@ -560,26 +668,17 @@ static void send_key(int num) {
 
 static void send_accept() { send_msg("accept"); }
 
-// Session management commands
-static void send_create_session() { send_msg("create_session"); }
-static void send_list_sessions() { send_msg("list_sessions"); }
-static void send_join_session(const char *name) {
-  char buf[48];
-  snprintf(buf, sizeof(buf), "join:%s", name);
-  send_msg(buf);
-}
-
 static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
-  if (s_has_prompt) {
-    // Check if we're in session menu mode
-    if (s_in_session_menu && s_prompt_keys[0] == 1) {
-      // "Create new session" option
-      send_create_session();
-      vibes_short_pulse();
-    } else {
-      send_key(s_prompt_keys[0]);
-      vibes_short_pulse();
+  if (s_state == STATE_MENU) {
+    if (s_session_count > 0 && s_selected_idx > 0) {
+      s_selected_idx--;
+      layer_mark_dirty(s_canvas);
     }
+    return;
+  }
+  if (s_has_prompt) {
+    send_key(s_prompt_keys[0]);
+    vibes_short_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
@@ -589,16 +688,20 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   }
 }
 static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
-  if (s_has_prompt) {
-    // Check if we're in session menu mode
-    if (s_in_session_menu && s_prompt_keys[1] == 2) {
-      // "Refresh/List" option
-      send_list_sessions();
-      vibes_short_pulse();
+  if (s_state == STATE_MENU) {
+    if (s_session_count > 0) {
+      char msg[48];
+      snprintf(msg, sizeof(msg), "join:%s", s_sessions[s_selected_idx]);
+      send_msg(msg);
+      vibes_double_pulse();
     } else {
-      send_key(s_prompt_keys[1]);
-      vibes_short_pulse();
+      send_msg("list");
     }
+    return;
+  }
+  if (s_has_prompt) {
+    send_key(s_prompt_keys[1]);
+    vibes_short_pulse();
   } else if (s_auto_scroll) {
     send_accept();
     vibes_short_pulse();
@@ -608,21 +711,41 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   }
 }
 static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
-  if (s_has_prompt) {
-    // Check if we're in session menu mode
-    if (s_in_session_menu && s_prompt_keys[2] == 3) {
-      // "Join session" option - for now just refresh
-      // TODO: Add session selection UI
-      send_list_sessions();
-      vibes_double_pulse();
-    } else {
-      send_key(s_prompt_keys[2]);
-      vibes_double_pulse();
+  if (s_state == STATE_MENU) {
+    if (s_session_count > 0 && s_selected_idx < s_session_count - 1) {
+      s_selected_idx++;
+      layer_mark_dirty(s_canvas);
     }
+    return;
+  }
+  if (s_has_prompt) {
+    send_key(s_prompt_keys[2]);
+    vibes_double_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;
     layer_mark_dirty(s_canvas);
+  }
+}
+static void up_long_handler(ClickRecognizerRef recognizer, void *ctx) {
+  if (s_state == STATE_MENU) {
+    send_msg("create");
+    vibes_short_pulse();
+  }
+}
+static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
+  if (s_state == STATE_MENU) {
+    send_msg("list");
+    vibes_short_pulse();
+  }
+}
+static void select_long_handler(ClickRecognizerRef recognizer, void *ctx) {
+  if (s_state == STATE_SESSION) {
+    s_state = STATE_MENU;
+    send_msg("leave");
+    send_msg("list");
+    layer_mark_dirty(s_canvas);
+    vibes_short_pulse();
   }
 }
 static void back_long_handler(ClickRecognizerRef recognizer, void *ctx) {
@@ -640,7 +763,9 @@ static void click_config_provider(void *ctx) {
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
-  window_long_click_subscribe(BUTTON_ID_UP, 700, back_long_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_UP, 500, up_long_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, 500, down_long_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 500, select_long_handler, NULL);
 }
 
 static void window_load(Window *window) {
