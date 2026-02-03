@@ -2,11 +2,62 @@ const http = require('http');
 const WebSocket = require('ws');
 const fs = require('fs');
 const url = require('url');
+const { exec, spawn } = require('child_process');
 
 const WS_PORT = 8080;
 const HTTP_PORT = 8081;
 const LINE_W = 23;
 const MAX_LINES = 40;
+
+// ===========================================
+// TMUX SESSION MANAGEMENT
+// ===========================================
+
+// List all tmux sessions
+function listTmuxSessions(callback) {
+    exec('tmux list-sessions -F "#{session_name}|#{session_created}|#{session_attached}" 2>/dev/null', (err, stdout) => {
+        if (err) {
+            callback([]);
+            return;
+        }
+        const sessions = stdout.trim().split('\n').filter(l => l).map(line => {
+            const [name, created, attached] = line.split('|');
+            return { name, created: parseInt(created), attached: attached === '1' };
+        });
+        callback(sessions);
+    });
+}
+
+// Create new tmux session with Claude
+function createTmuxSession(sessionName, callback) {
+    const name = sessionName || 'vibe-' + Date.now().toString(36);
+    // Create detached session running Claude
+    exec(`tmux new-session -d -s "${name}" "claude"`, (err) => {
+        if (err) {
+            console.log('Failed to create tmux session:', err.message);
+            callback(null, err.message);
+        } else {
+            console.log('Created tmux session:', name);
+            callback(name, null);
+        }
+    });
+}
+
+// Kill a tmux session
+function killTmuxSession(sessionName, callback) {
+    exec(`tmux kill-session -t "${sessionName}"`, (err) => {
+        callback(!err);
+    });
+}
+
+// Send keys to tmux session (for voice input simulation)
+function sendToTmux(sessionName, text, callback) {
+    // Escape special characters for tmux
+    const escaped = text.replace(/"/g, '\\"');
+    exec(`tmux send-keys -t "${sessionName}" "${escaped}" Enter`, (err) => {
+        callback(!err);
+    });
+}
 
 // Per-session state
 const sessions = {}; // session_id -> { lines: [], currentTool, lastActivity, lastTranscriptLine, transcriptPath }
@@ -320,16 +371,68 @@ function broadcastScreen() {
 wss.on('connection', (ws) => {
     console.log('Watch connected');
     activeWs = ws;
-    broadcastScreen();
+
+    // Send initial state - check if any Claude sessions active
+    const activeId = activeSessionId();
+    if (activeId) {
+        broadcastScreen();
+    } else {
+        // No active session - send session list for selection UI
+        sendSessionList(ws);
+    }
 
     ws.on('message', (msg) => {
         try {
             const data = JSON.parse(msg.toString());
             console.log('FROM WATCH:', JSON.stringify(data));
-            // UP button: cycle to previous session
-            // DOWN button: cycle to next session
-            // SELECT: back to auto-follow
-            if (data.type === 'key') {
+
+            // ===========================================
+            // TMUX SESSION COMMANDS
+            // ===========================================
+
+            if (data.type === 'list_tmux') {
+                // Watch requests list of tmux sessions
+                sendSessionList(ws);
+            }
+            else if (data.type === 'create_session') {
+                // Watch requests new Claude session
+                createTmuxSession(data.name, (name, err) => {
+                    if (name) {
+                        ws.send(JSON.stringify({
+                            type: 'session_created',
+                            name,
+                            message: 'Session "' + name + '" created. Claude starting...'
+                        }));
+                        // Broadcast status update
+                        setTimeout(() => sendSessionList(ws), 1000);
+                    } else {
+                        ws.send(JSON.stringify({ type: 'error', message: err || 'Failed to create session' }));
+                    }
+                });
+            }
+            else if (data.type === 'join_session') {
+                // Watch wants to attach to a tmux session
+                const sessionName = data.name;
+                ws.send(JSON.stringify({
+                    type: 'session_joined',
+                    name: sessionName,
+                    message: 'Joined "' + sessionName + '"'
+                }));
+            }
+            else if (data.type === 'send_text') {
+                // Send text to a tmux session (for voice input)
+                sendToTmux(data.session, data.text, (ok) => {
+                    if (ok) {
+                        ws.send(JSON.stringify({ type: 'text_sent', session: data.session }));
+                    } else {
+                        ws.send(JSON.stringify({ type: 'error', message: 'Failed to send text' }));
+                    }
+                });
+            }
+            // ===========================================
+            // EXISTING KEY HANDLING
+            // ===========================================
+            else if (data.type === 'key') {
                 const ids = Object.keys(sessions).sort((a, b) =>
                     sessions[b].lastActivity - sessions[a].lastActivity);
                 if (ids.length <= 1) return;
@@ -343,7 +446,13 @@ wss.on('connection', (ws) => {
                 }
                 broadcastScreen();
             }
-        } catch {}
+            else if (data.type === 'accept') {
+                // Handle accept from watch
+                console.log('Watch accepted');
+            }
+        } catch (e) {
+            console.log('WS message parse error:', e.message);
+        }
     });
 
     ws.on('close', () => {
@@ -351,6 +460,27 @@ wss.on('connection', (ws) => {
         if (activeWs === ws) activeWs = null;
     });
 });
+
+// Send tmux session list to watch
+function sendSessionList(ws) {
+    listTmuxSessions((tmuxSessions) => {
+        // Also include Claude hook sessions
+        const claudeSessions = Object.entries(sessions).map(([id, s]) => ({
+            id: id.substring(0, 8),
+            type: 'claude',
+            lines: s.lines.length,
+            lastActivity: s.lastActivity,
+            currentTool: s.currentTool
+        }));
+
+        ws.send(JSON.stringify({
+            type: 'session_list',
+            tmux: tmuxSessions,
+            claude: claudeSessions,
+            hasActive: activeSessionId() !== null
+        }));
+    });
+}
 
 // HTTP server for hook events
 const httpServer = http.createServer((req, res) => {
@@ -405,7 +535,57 @@ const httpServer = http.createServer((req, res) => {
         }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(list));
-    } else {
+    }
+    // ===========================================
+    // TMUX HTTP ENDPOINTS
+    // ===========================================
+    else if (req.method === 'GET' && parsed.pathname === '/tmux/list') {
+        listTmuxSessions((list) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(list));
+        });
+    }
+    else if (req.method === 'POST' && parsed.pathname === '/tmux/create') {
+        const name = parsed.query.name;
+        createTmuxSession(name, (sessionName, err) => {
+            if (sessionName) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, name: sessionName }));
+            } else {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: err }));
+            }
+        });
+    }
+    else if (req.method === 'POST' && parsed.pathname === '/tmux/kill') {
+        const name = parsed.query.name;
+        if (!name) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'name required' }));
+            return;
+        }
+        killTmuxSession(name, (ok) => {
+            res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok }));
+        });
+    }
+    else if (req.method === 'POST' && parsed.pathname === '/tmux/send') {
+        const name = parsed.query.name;
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            if (!name || !body) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'name and body required' }));
+                return;
+            }
+            sendToTmux(name, body, (ok) => {
+                res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok }));
+            });
+        });
+    }
+    else {
         res.writeHead(404);
         res.end('Not found');
     }

@@ -32,6 +32,10 @@ static int s_line_h = 0;
 static int s_space_w = 0;
 static int s_page_step = 168;
 
+// Session management state
+static bool s_in_session_menu = true;  // Start in menu mode
+static char s_selected_session[32] = "";
+
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
 
@@ -398,6 +402,15 @@ static void inbox_received_callback(DictionaryIterator *iterator,
 
   Tuple *t = dict_find(iterator, MESSAGE_KEY_TERMINAL_DATA);
   if (t) {
+    // Detect if this is session menu content
+    if (strstr(t->value->cstring, "VibeCoder") != NULL &&
+        strstr(t->value->cstring, "session") != NULL) {
+      s_in_session_menu = true;
+    } else if (strstr(t->value->cstring, "Session") != NULL ||
+               strstr(t->value->cstring, "[") != NULL) {
+      // Active session content (has tool markers like [E], [$], etc.)
+      s_in_session_menu = false;
+    }
     memcpy(s_prev_buffer, s_buffer, sizeof(s_prev_buffer));
     strncpy(s_buffer, t->value->cstring, sizeof(s_buffer) - 1);
     s_buffer[sizeof(s_buffer) - 1] = '\0';
@@ -547,12 +560,27 @@ static void send_key(int num) {
 
 static void send_accept() { send_msg("accept"); }
 
+// Session management commands
+static void send_create_session() { send_msg("create_session"); }
+static void send_list_sessions() { send_msg("list_sessions"); }
+static void send_join_session(const char *name) {
+  char buf[48];
+  snprintf(buf, sizeof(buf), "join:%s", name);
+  send_msg(buf);
+}
+
 static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_has_prompt) {
-    send_key(s_prompt_keys[0]);
-    vibes_short_pulse();
+    // Check if we're in session menu mode
+    if (s_in_session_menu && s_prompt_keys[0] == 1) {
+      // "Create new session" option
+      send_create_session();
+      vibes_short_pulse();
+    } else {
+      send_key(s_prompt_keys[0]);
+      vibes_short_pulse();
+    }
   } else {
-    s_auto_scroll = false;
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
     if (s_scroll_offset < 0)
@@ -562,8 +590,15 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
 }
 static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_has_prompt) {
-    send_key(s_prompt_keys[1]);
-    vibes_short_pulse();
+    // Check if we're in session menu mode
+    if (s_in_session_menu && s_prompt_keys[1] == 2) {
+      // "Refresh/List" option
+      send_list_sessions();
+      vibes_short_pulse();
+    } else {
+      send_key(s_prompt_keys[1]);
+      vibes_short_pulse();
+    }
   } else if (s_auto_scroll) {
     send_accept();
     vibes_short_pulse();
@@ -574,10 +609,17 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
 }
 static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_has_prompt) {
-    send_key(s_prompt_keys[2]);
-    vibes_double_pulse();
+    // Check if we're in session menu mode
+    if (s_in_session_menu && s_prompt_keys[2] == 3) {
+      // "Join session" option - for now just refresh
+      // TODO: Add session selection UI
+      send_list_sessions();
+      vibes_double_pulse();
+    } else {
+      send_key(s_prompt_keys[2]);
+      vibes_double_pulse();
+    }
   } else {
-    s_auto_scroll = false;
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;
     layer_mark_dirty(s_canvas);
