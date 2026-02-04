@@ -27,6 +27,7 @@ static DisplayMode s_display_mode = MODE_VERBOSE;
 static char s_user_cmd[128] = "";
 static char s_claude_summary[256] = "";
 static char s_status[32] = "Ready";
+static char s_last_tool[64] = "";
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -344,11 +345,19 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   int status_h = 18;
   int bottom_y = bounds.size.h - prompt_h - status_h;
 
-  // Claude response (top, green) - main area
+  // Claude response (top, green) - leave room for tool below
+  int tool_h = s_last_tool[0] ? 16 : 0;
   if (s_claude_summary[0]) {
     graphics_context_set_text_color(ctx, GColorMintGreen);
     graphics_draw_text(ctx, s_claude_summary, body,
-        GRect(4, 4, bounds.size.w - 8, bottom_y - 8), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+        GRect(4, 4, bounds.size.w - 8, bottom_y - tool_h - 12), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  // Last tool used (cyan, above separator)
+  if (s_last_tool[0]) {
+    graphics_context_set_text_color(ctx, GColorCyan);
+    graphics_draw_text(ctx, s_last_tool, small,
+        GRect(4, bottom_y - tool_h - 2, bounds.size.w - 8, tool_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
   // Separator
@@ -593,7 +602,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       return;
     }
 
-    // CLEAN:cmd|summary|status - structured data for clean mode
+    // CLEAN:cmd|summary|status|tool - structured data for clean mode
     if (strncmp(data, "CLEAN:", 6) == 0) {
       const char *p = data + 6;
       const char *sep1 = strchr(p, '|');
@@ -610,8 +619,20 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           strncpy(s_claude_summary, p, len);
           s_claude_summary[len] = '\0';
           p = sep2 + 1;
-          strncpy(s_status, p, sizeof(s_status) - 1);
-          s_status[sizeof(s_status) - 1] = '\0';
+          const char *sep3 = strchr(p, '|');
+          if (sep3) {
+            len = (int)(sep3 - p);
+            if (len > 31) len = 31;
+            strncpy(s_status, p, len);
+            s_status[len] = '\0';
+            p = sep3 + 1;
+            strncpy(s_last_tool, p, sizeof(s_last_tool) - 1);
+            s_last_tool[sizeof(s_last_tool) - 1] = '\0';
+          } else {
+            strncpy(s_status, p, sizeof(s_status) - 1);
+            s_status[sizeof(s_status) - 1] = '\0';
+            s_last_tool[0] = '\0';
+          }
         }
       }
       layer_mark_dirty(s_canvas);

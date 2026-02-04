@@ -346,10 +346,32 @@ function findTranscriptFile(sessionName) {
     return null;
 }
 
+// Format tool_use into compact string (stolen from other Claude's parser)
+function formatToolUse(name, input) {
+    switch (name) {
+        case 'Bash': {
+            let cmd = input?.command || '';
+            // Compact: remove cd, show just the command
+            cmd = cmd.replace(/cd\s+[^\s&|;]+\s*[;&|]*\s*/g, '').trim();
+            if (cmd.length > 40) cmd = cmd.substring(0, 37) + '...';
+            return '$ ' + (cmd || '(empty)');
+        }
+        case 'Read': return '◎ read ' + (input?.file_path || '').split('/').pop();
+        case 'Write': return '✎ write ' + (input?.file_path || '').split('/').pop();
+        case 'Edit': return '✎ edit ' + (input?.file_path || '').split('/').pop();
+        case 'Grep': return '⌕ grep "' + (input?.pattern || '').substring(0, 20) + '"';
+        case 'Glob': return '⌕ glob ' + (input?.pattern || '');
+        case 'Task': return '◇ agent: ' + (input?.description || '').substring(0, 30);
+        case 'WebFetch': return '↓ fetch ' + (input?.url || '').substring(0, 30);
+        case 'WebSearch': return '◈ search "' + (input?.query || '').substring(0, 25) + '"';
+        default: return '⚙ ' + name;
+    }
+}
+
 // Extract structured data from JSONL transcript (CLEAN mode)
 function extractCleanDataFromTranscript(transcriptPath) {
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-        return { userCmd: '', summary: '', status: 'No transcript' };
+        return { userCmd: '', summary: '', status: 'No transcript', lastTool: '' };
     }
 
     try {
@@ -359,6 +381,7 @@ function extractCleanDataFromTranscript(transcriptPath) {
         let userCmd = '';
         let summary = '';
         let status = 'Ready';
+        let lastTool = '';
 
         // Read last ~100 lines for recent activity (reverse order to find latest)
         const recentLines = lines.slice(-100).reverse();
@@ -393,24 +416,33 @@ function extractCleanDataFromTranscript(transcriptPath) {
                     }
                 }
 
-                // Assistant message - look for text content (not thinking, not tool_use)
-                if (entry.type === 'assistant' && entry.message && entry.message.content && !summary) {
+                // Assistant message - look for text AND tool_use
+                if (entry.type === 'assistant' && entry.message && entry.message.content) {
                     const contents = entry.message.content;
                     if (Array.isArray(contents)) {
                         for (const c of contents) {
-                            if (c.type === 'text' && c.text && c.text.length > 10) {
+                            // Extract tool_use (most recent)
+                            if (c.type === 'tool_use' && c.name && !lastTool) {
+                                lastTool = formatToolUse(c.name, c.input);
+                            }
+                            // Extract text summary
+                            if (!summary && c.type === 'text' && c.text && c.text.length > 10) {
                                 // Skip code blocks and tool descriptions
                                 if (!c.text.startsWith('```') && !c.text.includes('tool_use')) {
-                                    summary = c.text.substring(0, 400);
-                                    break;
+                                    // Show END of text if too long (user wants to see latest info)
+                                    if (c.text.length > 200) {
+                                        summary = '...' + c.text.substring(c.text.length - 200);
+                                    } else {
+                                        summary = c.text;
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // Stop if we have both
-                if (userCmd && summary) break;
+                // Stop if we have all three
+                if (userCmd && summary && lastTool) break;
 
             } catch (e) { /* skip invalid JSON lines */ }
         }
@@ -433,7 +465,7 @@ function extractCleanDataFromTranscript(transcriptPath) {
             } catch (e) {}
         }
 
-        return { userCmd, summary, status };
+        return { userCmd, summary, status, lastTool };
     } catch (e) {
         console.log('Transcript error:', e.message);
         return { userCmd: '', summary: 'Error: ' + e.message, status: 'Error' };
@@ -446,28 +478,27 @@ function extractRealtimeStatus(raw) {
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
     const lines = cleaned.split('\n');
 
-    // Check last 15 lines for status patterns
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 15); i--) {
+    // Check last 20 lines for status patterns
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
         const line = lines[i].trim();
+        if (!line) continue;
 
         // Pattern 1: "Word..." or "Word…" (thinking indicator)
-        // Matches: Crystallizing..., Cogitating..., Baking..., etc.
-        const thinkingMatch = line.match(/^([A-Z][a-z]+(?:ing|ting)?)(\.{3}|…)\s*$/);
-        if (thinkingMatch) {
-            return thinkingMatch[1] + '...';
+        // Matches: ✳ Crystallizing..., Cogitating…, etc. (anywhere in line)
+        const thinkMatch = line.match(/([A-Z][a-z]+)(\.{3}|…)/);
+        if (thinkMatch) {
+            return thinkMatch[1] + '...';
         }
 
         // Pattern 2: "Word for Xs" or "Word for Xm Ys" (done indicator)
-        // Matches: "Thought for 2s", "Baked for 1m 30s", "Cogitated for 5s"
-        const doneMatch = line.match(/^([A-Z][a-z]+(?:ed|t)?)\s+for\s+\d+[ms]/);
-        if (doneMatch) {
+        // Matches: "Thought for 2s", "Baked for 1m 30s", "Cogitated for 50s"
+        if (/[A-Z][a-z]+\s+for\s+\d+[ms]/.test(line)) {
             return 'Done';
         }
 
-        // Pattern 3: Single capitalized word that looks like a status
-        // Matches standalone: "Thinking", "Processing", etc.
-        if (/^[A-Z][a-z]+ing\s*$/.test(line) && line.length < 20) {
-            return line.trim() + '...';
+        // Pattern 3: "(thought for Xs)" in parentheses
+        if (/\(thought for \d+/.test(line)) {
+            return 'Done';
         }
     }
     return null; // No fun word found, use transcript status
