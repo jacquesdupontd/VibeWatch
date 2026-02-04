@@ -67,6 +67,31 @@ function hyphenate(text, width) {
 
 // Color codes for watch:
 // W=white, B=blue, R=red, O=orange, Y=yellow, C=cyan, G=green, L=lightgray
+// Remove ALL emojis - comprehensive Unicode ranges
+function removeEmojis(str) {
+    return str
+        // Emoticons: 😀-🙏
+        .replace(/[\u{1F600}-\u{1F64F}]/gu, '')
+        // Symbols & Pictographs: 🌀-🗿
+        .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
+        // Transport & Map: 🚀-🛿
+        .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
+        // Supplemental Symbols: 🤀-🧿
+        .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
+        // Misc Symbols: ☀-⛿
+        .replace(/[\u{2600}-\u{26FF}]/gu, '')
+        // Dingbats: ✀-➿
+        .replace(/[\u{2700}-\u{27BF}]/gu, '')
+        // Enclosed Alphanumerics: ⓪-🅿
+        .replace(/[\u{24C2}-\u{1F251}]/gu, '')
+        // Flags: 🇦-🇿
+        .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+        // Variation Selectors
+        .replace(/[\uFE00-\uFE0F]/g, '')
+        // Zero Width Joiner
+        .replace(/\u200D/g, '');
+}
+
 function clean(str) {
     return str
         .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
@@ -642,10 +667,11 @@ function extractTextFromJSONL(sessionPath) {
                             let text = block.text
                                 .replace(/\*\*/g, '')  // Remove bold
                                 .replace(/`/g, '')     // Remove code ticks
-                                .replace(/\n{3,}/g, '\n\n')  // Max 2 consecutive newlines
-                                // Remove ALL emojis and non-ASCII chars (except newlines)
-                                .replace(/[^\x20-\x7E\n]/g, '')
-                                .trim();
+                                .replace(/\n{3,}/g, '\n\n');  // Max 2 consecutive newlines
+                            // Remove ALL emojis comprehensively
+                            text = removeEmojis(text);
+                            // Remove remaining non-ASCII (except newlines)
+                            text = text.replace(/[^\x20-\x7E\n]/g, '').trim();
                             if (text.length > 20) {
                                 textParts.unshift(text);
                             }
@@ -719,7 +745,9 @@ function extractRealtimeText(raw) {
     if (paragraphs.length > 0) {
         const recent = paragraphs.slice(-3);
         let summary = recent.join('\n');  // Join with newlines to preserve structure
-        // Remove emojis and non-ASCII chars (except newlines)
+        // Remove ALL emojis comprehensively
+        summary = removeEmojis(summary);
+        // Remove remaining non-ASCII chars (except newlines)
         summary = summary.replace(/[^\x20-\x7E\n]/g, '');
         if (summary.length > 800) {
             summary = '...' + summary.substring(summary.length - 797);

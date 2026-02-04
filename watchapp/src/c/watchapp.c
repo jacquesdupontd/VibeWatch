@@ -44,6 +44,11 @@ static char s_last_tool[64] = "";
 static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[64] = "";  // Active task name (Creating README.md, etc.)
 static bool s_task_running = false;  // Is a task currently running?
+
+// Marquee duplicate buffers for seamless infinite scroll
+static char s_command_marquee_buf[256] = "";  // "text     text     text"
+static char s_prompt_marquee_buf[256] = "";
+static char s_status_marquee_buf[256] = "";
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
 static int s_marquee_offset = 0;  // For horizontal marquee (commands)
 
@@ -814,26 +819,37 @@ static void start_command_marquee() {
     s_command_marquee_anim = NULL;
   }
 
-  // Check if text is too long (visible width ~136px, ~23 chars)
-  GSize content_size = text_layer_get_content_size(s_clean_command_layer);
-  int overflow = content_size.w - 136;
+  // Check if text is too long (visible width ~136px)
+  int text_len = strlen(s_last_tool);
+  if (text_len == 0) return;
 
-  if (overflow > 10) {
-    // Animate from right edge to left (scroll left to show overflow)
+  // Create duplicated text: "text     text     text" for seamless infinite scroll
+  snprintf(s_command_marquee_buf, sizeof(s_command_marquee_buf), "%s     %s     %s",
+           s_last_tool, s_last_tool, s_last_tool);
+  text_layer_set_text(s_clean_command_layer, s_command_marquee_buf);
+
+  // Get content size of ONE instance (original text + gap)
+  GSize content_size = text_layer_get_content_size(s_clean_command_layer);
+  int one_cycle_width = content_size.w / 3;  // Width of one "text     "
+
+  if (one_cycle_width > 136) {
+    // Animate exactly one cycle distance for seamless loop
     GRect start = GRect(4, 111, 600, 16);
-    GRect finish = GRect(4 - overflow - 20, 111, 600, 16);  // Extra 20px gap
+    GRect finish = GRect(4 - one_cycle_width, 111, 600, 16);
 
     s_command_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_command_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_command_marquee_anim);
-    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
+    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
     animation_set_curve(anim, AnimationCurveLinear);
-    // No delay for seamless infinite scroll
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = command_marquee_stopped
     }, NULL);
     animation_schedule(anim);
+  } else {
+    // Text is short - show original without duplication
+    text_layer_set_text(s_clean_command_layer, s_last_tool);
   }
 }
 
@@ -848,26 +864,37 @@ static void start_prompt_marquee() {
     s_prompt_marquee_anim = NULL;
   }
 
-  // Check if text is too long (visible width ~136px)
-  GSize content_size = text_layer_get_content_size(s_clean_prompt_layer);
-  int overflow = content_size.w - 136;
+  // Get current text (either user_cmd or suggestion)
+  const char *text = s_suggestion[0] ? s_suggestion : s_user_cmd;
+  if (!text || text[0] == '\0') return;
 
-  if (overflow > 10) {
-    // Animate from right edge to left
+  // Create duplicated text for seamless infinite scroll
+  snprintf(s_prompt_marquee_buf, sizeof(s_prompt_marquee_buf), "%s     %s     %s",
+           text, text, text);
+  text_layer_set_text(s_clean_prompt_layer, s_prompt_marquee_buf);
+
+  // Get content size of ONE instance
+  GSize content_size = text_layer_get_content_size(s_clean_prompt_layer);
+  int one_cycle_width = content_size.w / 3;
+
+  if (one_cycle_width > 136) {
+    // Animate exactly one cycle distance
     GRect start = GRect(4, 129, 600, 16);
-    GRect finish = GRect(4 - overflow - 20, 129, 600, 16);  // Extra 20px gap
+    GRect finish = GRect(4 - one_cycle_width, 129, 600, 16);
 
     s_prompt_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
-    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
+    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
     animation_set_curve(anim, AnimationCurveLinear);
-    // No delay for seamless infinite scroll
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = prompt_marquee_stopped
     }, NULL);
     animation_schedule(anim);
+  } else {
+    // Text is short - show original
+    text_layer_set_text(s_clean_prompt_layer, text);
   }
 }
 
@@ -885,7 +912,7 @@ static void status_marquee_stopped(Animation *animation, bool finished, void *co
 
 // Start horizontal marquee for status layer (active task)
 static void start_status_marquee() {
-  if (!s_clean_status_layer) return;
+  if (!s_clean_status_layer || !s_active_task[0]) return;
 
   // Stop existing animation
   if (s_status_marquee_anim) {
@@ -894,26 +921,37 @@ static void start_status_marquee() {
     s_status_marquee_anim = NULL;
   }
 
-  // Check if task text is too long (visible width ~144px)
-  GSize content_size = text_layer_get_content_size(s_clean_status_layer);
-  int overflow = content_size.w - 144;
+  // Create duplicated text for seamless infinite scroll
+  snprintf(s_status_marquee_buf, sizeof(s_status_marquee_buf), "%s     %s     %s",
+           s_active_task, s_active_task, s_active_task);
+  text_layer_set_text(s_clean_status_layer, s_status_marquee_buf);
 
-  if (overflow > 10) {
-    // Animate from right edge to left (infinite scroll like pharmacies)
+  // Get content size of ONE instance
+  GSize content_size = text_layer_get_content_size(s_clean_status_layer);
+  int one_cycle_width = content_size.w / 3;
+
+  if (one_cycle_width > 144) {
+    // Change alignment to Left for marquee
+    text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);
+
+    // Animate exactly one cycle distance
     GRect start = GRect(0, 150, 600, 18);
-    GRect finish = GRect(-overflow - 20, 150, 600, 18);  // Extra 20px gap
+    GRect finish = GRect(-one_cycle_width, 150, 600, 18);
 
     s_status_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_status_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_status_marquee_anim);
-    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
+    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
     animation_set_curve(anim, AnimationCurveLinear);
-    // No delay for seamless infinite scroll
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = status_marquee_stopped
     }, NULL);
     animation_schedule(anim);
+  } else {
+    // Text is short - show original centered
+    text_layer_set_text(s_clean_status_layer, s_active_task);
+    text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
   }
 }
 
@@ -1444,7 +1482,7 @@ static void create_clean_layers() {
   text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
   text_layer_set_text_color(s_clean_status_layer, GColorWhite);
   text_layer_set_font(s_clean_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);  // Left for marquee
+  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);  // Center by default
   text_layer_set_overflow_mode(s_clean_status_layer, GTextOverflowModeFill);  // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_status_layer));
 
