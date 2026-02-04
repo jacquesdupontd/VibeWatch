@@ -472,14 +472,14 @@ function extractCleanDataFromTranscript(transcriptPath) {
     }
 }
 
-// Extract real-time status from tmux (fun words like Cogitating, Baking, etc.)
-// Use REGEX to match any "Word..." pattern, with BLACKLIST of false positives
-const STATUS_BLACKLIST = [
-    'Reading', 'Writing', 'Installing', 'Creating', 'Processing',
-    'Building', 'Compiling', 'Running', 'Checking', 'Loading',
-    'Updating', 'Searching', 'Connecting', 'Downloading', 'Uploading'
+// TASK detection words - these indicate active work, not thinking
+const TASK_WORDS = [
+    'Creating', 'Writing', 'Reading', 'Editing', 'Building', 'Installing',
+    'Processing', 'Compiling', 'Running', 'Checking', 'Loading', 'Updating',
+    'Searching', 'Downloading', 'Uploading', 'Generating', 'Analyzing'
 ];
 
+// Extract real-time status from tmux (fun words like Cogitating, Baking, etc.)
 function extractRealtimeStatus(raw) {
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
     const lines = cleaned.split('\n');
@@ -490,17 +490,16 @@ function extractRealtimeStatus(raw) {
         if (!line) continue;
 
         // Pattern 1: Any "Word..." or "Word…" (thinking indicator)
-        // Must start with status indicators (·, ✳, ✶, ✽, *, etc.) or be standalone
         const thinkMatch = line.match(/[·✳✶✽*]?\s*([A-Z][a-z]+)(\.{3}|…)/);
         if (thinkMatch) {
             const word = thinkMatch[1];
-            // Skip blacklisted words (tool outputs, not thinking)
-            if (!STATUS_BLACKLIST.includes(word)) {
+            // Skip task words (handled separately)
+            if (!TASK_WORDS.includes(word)) {
                 return word + '...';
             }
         }
 
-        // Pattern 2: "Word for Xs" (done indicator) - past tense thinking
+        // Pattern 2: "Word for Xs" (done indicator)
         const doneMatch = line.match(/([A-Z][a-z]+)\s+for\s+\d+[ms]/);
         if (doneMatch) {
             return 'Done';
@@ -509,6 +508,36 @@ function extractRealtimeStatus(raw) {
         // Pattern 3: "(thought for Xs)" in parentheses
         if (/\(thought for \d+/.test(line)) {
             return 'Done';
+        }
+    }
+    return null;
+}
+
+// Extract active TASK from tmux (Creating README.md..., Writing file..., etc.)
+// Returns: { isTask: true, name: "Creating README.md", time: "51s" } or null
+function extractActiveTask(raw) {
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Pattern: "Creating README.md... (51s · ↓ 814 tokens)" or "· Creating file..."
+        const taskMatch = line.match(/[·✳✶✽*]?\s*(Creating|Writing|Reading|Editing|Building|Installing|Processing|Compiling|Running|Generating|Analyzing)\s+([^.…]+)(\.{3}|…)\s*(\((\d+[ms]?))?/i);
+        if (taskMatch) {
+            const action = taskMatch[1];
+            let target = taskMatch[2].trim();
+            const time = taskMatch[5] || '';
+
+            // Clean up target name
+            if (target.length > 25) target = target.substring(0, 22) + '...';
+
+            return {
+                isTask: true,
+                name: action + ' ' + target,
+                time: time
+            };
         }
     }
     return null;
@@ -980,6 +1009,15 @@ wss.on('connection', (ws) => {
                 // Add suggestion to cleanData for CLEAN mode
                 if (suggestion) {
                     cleanData.suggestion = suggestion;
+                }
+
+                // Detect active task (Creating/Writing/etc.)
+                const activeTask = extractActiveTask(raw);
+                if (activeTask) {
+                    cleanData.activeTask = activeTask.name;
+                    cleanData.taskTime = activeTask.time;
+                    // Override status to show task is running
+                    cleanData.status = activeTask.name;
                 }
 
                 // Debug: log cleanData
