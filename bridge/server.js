@@ -410,10 +410,8 @@ function extractCleanDataFromTranscript(transcriptPath) {
                             }
                         }
                     }
-                    // Truncate and show END of long prompts
-                    if (userCmd && userCmd.length > 60) {
-                        userCmd = '...' + userCmd.substring(userCmd.length - 57);
-                    }
+                    // Don't truncate - let the watch handle display
+                    // User wants to see FULL text they typed/dictated
                 }
 
                 // Assistant message - look for text AND tool_use
@@ -752,10 +750,7 @@ function extractUserPrompt(raw) {
             if (/^─+$/.test(text)) continue;
             if (/^\d+\s+file/.test(text)) continue;
             if (/hook|Running\s/i.test(text)) continue;
-            // This looks like a real user prompt
-            if (text.length > 50) {
-                text = '...' + text.substring(text.length - 47);
-            }
+            // This looks like a real user prompt - don't truncate
             return text;
         }
     }

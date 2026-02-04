@@ -364,41 +364,45 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   int content_w = bounds.size.w - 8;
   if (content_w < 50) content_w = 50;  // Safety minimum
 
-  // ===== 1. Draw Claude text (green) with gentle scroll =====
+  // ===== 1. Draw Claude text (violet) - with UP/DOWN scroll =====
   if (s_claude_summary[0]) {
     int len = strlen(s_claude_summary);
-    int offset = 0;
+    const char *text_to_show = s_claude_summary;
 
-    // Only scroll if text is long enough
-    if (len > 200) {
-      // Simple character-based scroll: cycle through text
-      int cycle = len - 150;  // How many chars to scroll through
-      if (cycle > 0) {
-        offset = (s_anim_counter * 3) % (cycle + 30);  // +30 for pause
-        if (offset > cycle) offset = cycle;  // Pause at end
+    // Scroll handling: s_clean_scroll = char offset from start
+    // -1 = auto (show end), >=0 = manual scroll position
+    if (s_clean_scroll < 0) {
+      // Auto mode: show END
+      if (len > 150) {
+        int start = len - 150;
+        while (start > 0 && s_claude_summary[start] != ' ') start--;
+        if (s_claude_summary[start] == ' ') start++;
+        text_to_show = s_claude_summary + start;
       }
+    } else {
+      // Manual scroll mode
+      int start = s_clean_scroll;
+      if (start >= len) start = len > 150 ? len - 150 : 0;
+      if (start > 0) {
+        while (start > 0 && s_claude_summary[start] != ' ') start--;
+        if (s_claude_summary[start] == ' ') start++;
+      }
+      text_to_show = s_claude_summary + start;
     }
 
-    // Find word boundary for offset
-    if (offset > 0 && offset < len) {
-      while (offset > 0 && s_claude_summary[offset] != ' ') offset--;
-      if (s_claude_summary[offset] == ' ') offset++;
-    }
-
-    graphics_context_set_text_color(ctx, GColorMintGreen);
-    graphics_draw_text(ctx, s_claude_summary + offset, body,
+    graphics_context_set_text_color(ctx, GColorPurple);  // Violet comme l'IA
+    graphics_draw_text(ctx, text_to_show, body,
         GRect(4, 2, content_w, content_h),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-
-    // Scroll indicator if scrolling
-    if (offset > 0) {
-      graphics_context_set_fill_color(ctx, GColorYellow);
-      graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 4, 4, 4), 0, GCornerNone);
-    }
   }
 
   // ===== 2. Last tool (cyan) - ABOVE separator line, with MARQUEE =====
   int tool_y = content_h;
+
+  // Black bar to hide scrolling text underneath tool area
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(0, tool_y - 2, bounds.size.w, tool_h + 8), 0, GCornerNone);
+
   if (s_last_tool[0]) {
     static char tool_buf[48];
     int tool_len = strlen(s_last_tool);
@@ -431,7 +435,7 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   graphics_draw_line(ctx, GPoint(10, line_y), GPoint(bounds.size.w - 10, line_y));
 
   // ===== 3. Prompt OR Suggestion (yellow) - BELOW line, ABOVE status =====
-  int prompt_y = line_y + 2;
+  int prompt_y = line_y - 1;  // Remonté de 3px pour meilleur espacement
   bool has_suggestion = (s_suggestion[0] != '\0');
   static char prompt_buf[48];
 
@@ -465,19 +469,20 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
         GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   } else if (s_user_cmd[0]) {
-    // User prompt: show END with "..." prefix
-    graphics_context_set_text_color(ctx, GColorYellow);
-    int len = strlen(s_user_cmd);
-    if (len > 32) {
-      snprintf(prompt_buf, sizeof(prompt_buf), "...%s", s_user_cmd + len - 29);
-      graphics_draw_text(ctx, prompt_buf, small,
-          GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
-          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    } else {
-      graphics_draw_text(ctx, s_user_cmd, small,
-          GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
-          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    // User prompt: WHITE text - show END if too long (like typing feedback)
+    graphics_context_set_text_color(ctx, GColorWhite);  // Blanc pour le prompt user
+    int cmd_len = strlen(s_user_cmd);
+    const char *display_text = s_user_cmd;
+
+    // If text is too long, show the END (what user just typed)
+    if (cmd_len > 35) {
+      // Show last ~35 chars to always see the end
+      display_text = s_user_cmd + cmd_len - 35;
     }
+
+    graphics_draw_text(ctx, display_text, small,
+        GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
   // Status bar (colored based on status)
@@ -651,14 +656,14 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   }
 }
 
-// Simple blink timer
+// Simple blink and marquee timer
 static void blink_tick(void *data) {
   s_cursor_visible = !s_cursor_visible;
   s_anim_counter++;
   s_marquee_offset++;
   if (s_anim_counter >= 1000) s_anim_counter = 0;
   layer_mark_dirty(s_canvas);
-  s_cursor_timer = app_timer_register(300, blink_tick, NULL);
+  s_cursor_timer = app_timer_register(250, blink_tick, NULL);
 }
 
 // Streaming timer - characters per tick
@@ -963,8 +968,19 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: UP does nothing for now (no scroll)
-    vibes_short_pulse();
+    // CLEAN mode: UP = scroll up in Claude text
+    int len = strlen(s_claude_summary);
+    if (s_clean_scroll < 0) {
+      // First press: go to end - 150 chars
+      s_clean_scroll = len > 150 ? len - 150 : 0;
+    }
+    if (s_clean_scroll > 0) {
+      s_clean_scroll -= 50;  // Scroll up by ~50 chars
+      if (s_clean_scroll < 0) s_clean_scroll = 0;
+      layer_mark_dirty(s_canvas);
+    } else {
+      vibes_short_pulse();  // Already at top
+    }
   } else {
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
@@ -1016,8 +1032,19 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[2]);
     vibes_double_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: DOWN does nothing for now (no scroll)
-    vibes_short_pulse();
+    // CLEAN mode: DOWN = scroll down or back to auto (end)
+    int len = strlen(s_claude_summary);
+    if (s_clean_scroll >= 0) {
+      int max_offset = len > 150 ? len - 150 : 0;
+      if (s_clean_scroll + 50 >= max_offset) {
+        s_clean_scroll = -1;  // Back to auto (show end)
+      } else {
+        s_clean_scroll += 50;  // Scroll down by ~50 chars
+      }
+      layer_mark_dirty(s_canvas);
+    } else {
+      vibes_short_pulse();  // Already at end
+    }
   } else {
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;
@@ -1083,7 +1110,7 @@ static void window_load(Window *window) {
   s_chars_total = count_chars();
   s_chars_shown = 0;
   start_streaming();
-  s_cursor_timer = app_timer_register(300, blink_tick, NULL);
+  s_cursor_timer = app_timer_register(250, blink_tick, NULL);
 }
 
 static void window_unload(Window *window) {
