@@ -850,6 +850,8 @@ static void start_command_marquee() {
   } else {
     // Text is short - show original without duplication
     text_layer_set_text(s_clean_command_layer, s_last_tool);
+    // Reset position to default
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 600, 16));
   }
 }
 
@@ -895,6 +897,8 @@ static void start_prompt_marquee() {
   } else {
     // Text is short - show original
     text_layer_set_text(s_clean_prompt_layer, text);
+    // Reset position to default
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 600, 16));
   }
 }
 
@@ -1124,15 +1128,21 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       }
       if (s_clean_status_layer) {
         // Set status with appropriate color
-        text_layer_set_text(s_clean_status_layer, s_task_running ? s_active_task : s_status);
+        const char *status_text = s_task_running ? s_active_task : s_status;
+        text_layer_set_text(s_clean_status_layer, status_text);
+
         if (s_task_running) {
           text_layer_set_background_color(s_clean_status_layer, GColorPurple);
+          // Start marquee for long tasks
+          if (s_active_task[0]) {
+            start_status_marquee();
+          }
         } else {
           text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
-        }
-        // Start marquee scroll if task text is too long
-        if (s_task_running && s_active_task[0]) {
-          start_status_marquee();
+          // Reset to centered alignment for short status
+          text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
+          // Reset position
+          layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 600, 18));
         }
       }
 

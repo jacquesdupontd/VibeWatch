@@ -685,6 +685,9 @@ function extractTextFromJSONL(sessionPath) {
 
         if (textParts.length > 0) {
             let summary = textParts.join('\n');  // Join with newlines to preserve structure
+            // Remove ALL emojis one more time (double-check)
+            summary = removeEmojis(summary);
+            summary = summary.replace(/[^\x20-\x7E\n]/g, '');  // Remove any remaining non-ASCII
             // Show END of text (most recent)
             if (summary.length > 800) {
                 summary = '...' + summary.substring(summary.length - 797);
