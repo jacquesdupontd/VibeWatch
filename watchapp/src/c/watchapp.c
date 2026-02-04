@@ -40,9 +40,9 @@ static DisplayMode s_display_mode = MODE_VERBOSE;
 static char s_user_cmd[128] = "";
 static char s_claude_summary[1024] = "";  // Larger buffer for multiple paragraphs
 static char s_status[32] = "Ready";
-static char s_last_tool[64] = "";
+static char s_last_tool[256] = "";  // Increased for long commands
 static char s_suggestion[128] = "";  // Ghost text suggestion
-static char s_active_task[64] = "";  // Active task name (Creating README.md, etc.)
+static char s_active_task[128] = "";  // Increased for long task names
 static bool s_task_running = false;  // Is a task currently running?
 
 // Marquee duplicate buffers for seamless infinite scroll
@@ -1070,7 +1070,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
             const char *sep4 = strchr(p, '|');
             if (sep4) {
               len = (int)(sep4 - p);
-              if (len > 63) len = 63;
+              if (len > 255) len = 255;  // Increased buffer size
               strncpy(s_last_tool, p, len);
               s_last_tool[len] = '\0';
               p = sep4 + 1;
@@ -1141,8 +1141,14 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
           // Reset to centered alignment for short status
           text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
-          // Reset position
-          layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 600, 18));
+          // Reset position - CRITICAL
+          layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 144, 18));
+          // Stop any running marquee animation
+          if (s_status_marquee_anim) {
+            animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
+            property_animation_destroy(s_status_marquee_anim);
+            s_status_marquee_anim = NULL;
+          }
         }
       }
 
