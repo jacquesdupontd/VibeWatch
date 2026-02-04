@@ -61,6 +61,7 @@ static bool s_in_rapid_mode = false;
 static AppTimer *s_debounce_timer = NULL;
 
 // Pending update buffers (for debouncing)
+static char s_pending_claude_summary[1024] = "";
 static char s_pending_last_tool[256] = "";
 static char s_pending_user_cmd[128] = "";
 static char s_pending_active_task[128] = "";
@@ -1006,39 +1007,50 @@ static void start_streaming() {
 // Apply pending updates to UI - called after debounce delay
 static void apply_pending_updates() {
   // Copy pending buffers to active buffers
+  strncpy(s_claude_summary, s_pending_claude_summary, sizeof(s_claude_summary) - 1);
   strncpy(s_last_tool, s_pending_last_tool, sizeof(s_last_tool) - 1);
   strncpy(s_user_cmd, s_pending_user_cmd, sizeof(s_user_cmd) - 1);
   strncpy(s_active_task, s_pending_active_task, sizeof(s_active_task) - 1);
   s_task_running = s_pending_task_running;
 
-  // Update UI layers
+  // Update Claude text layer FIRST (most important)
+  if (s_clean_claude_layer) {
+    text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+    start_claude_scroll();
+  }
+
+  // Update command layer
   if (s_clean_command_layer) {
     text_layer_set_text(s_clean_command_layer, s_last_tool);
     start_command_marquee();
   }
 
+  // Update prompt layer
   if (s_clean_prompt_layer) {
     const char *prompt_text = s_user_cmd[0] ? s_user_cmd : s_suggestion;
     text_layer_set_text(s_clean_prompt_layer, prompt_text);
     // Set color based on text type
-    GColor prompt_color = s_suggestion[0] && !s_user_cmd[0] ? GColorLightGray : GColorWhite;
+    GColor prompt_color = s_suggestion[0] && !s_user_cmd[0] ? GColorYellow : GColorWhite;
     text_layer_set_text_color(s_clean_prompt_layer, prompt_color);
     start_prompt_marquee();
   }
 
+  // Update status layer
   if (s_clean_status_layer) {
     const char *status_text = s_task_running ? s_active_task : s_status;
     text_layer_set_text(s_clean_status_layer, status_text);
 
-    if (s_task_running) {
+    if (s_task_running && s_active_task[0]) {
+      // Task is running - show purple with marquee
       text_layer_set_background_color(s_clean_status_layer, GColorPurple);
-      if (s_active_task[0]) {
-        start_status_marquee();
-      }
+      text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);
+      start_status_marquee();
     } else {
+      // No task - show normal status centered
       text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
       text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
       layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 144, 18));
+      // Stop marquee animation
       if (s_status_marquee_anim) {
         animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
         property_animation_destroy(s_status_marquee_anim);
@@ -1172,19 +1184,14 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         }
       }
 
-      // Update Claude text immediately (always visible, no animation conflicts)
-      if (s_clean_claude_layer) {
-        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
-        start_claude_scroll();
-      }
-
       // Detect rapid update mode
       uint32_t now = (uint32_t)time(NULL) * 1000;  // Approximate ms
       uint32_t time_since_last = now - s_last_update_time;
       bool is_rapid_update = (s_last_update_time > 0) && (time_since_last < RAPID_THRESHOLD_MS);
       s_last_update_time = now;
 
-      // Store updates in pending buffers
+      // Store ALL updates in pending buffers
+      strncpy(s_pending_claude_summary, s_claude_summary, sizeof(s_pending_claude_summary) - 1);
       strncpy(s_pending_last_tool, s_last_tool, sizeof(s_pending_last_tool) - 1);
       strncpy(s_pending_user_cmd, s_user_cmd, sizeof(s_pending_user_cmd) - 1);
       strncpy(s_pending_active_task, s_active_task, sizeof(s_pending_active_task) - 1);
@@ -1197,7 +1204,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       }
 
       if (is_rapid_update) {
-        // In rapid mode - defer updates to avoid animation thrashing
+        // In rapid mode - defer ALL updates to avoid animation thrashing
         s_in_rapid_mode = true;
         s_update_pending = true;
         // Schedule debounced update after delay
@@ -1206,6 +1213,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         // Visual feedback: change status bar to orange during rapid mode
         if (s_clean_status_layer) {
           text_layer_set_background_color(s_clean_status_layer, GColorOrange);
+          text_layer_set_text(s_clean_status_layer, "Rapid mode...");
         }
       } else {
         // Normal mode - apply updates immediately for responsiveness
