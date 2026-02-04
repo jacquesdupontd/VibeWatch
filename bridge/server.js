@@ -990,7 +990,37 @@ wss.on('connection', (ws) => {
                         lastTool: cleanData.lastTool || '',
                         activeTask: cleanData.activeTask || ''
                     };
-                    suggestion = cleanData.suggestion;
+
+                    // ALSO capture terminal for suggestions ONLY (not in .jsonl)
+                    // NOTE: We DON'T capture live typing - it causes animation bugs
+                    // Prompt will appear after Enter (from .jsonl)
+                    try {
+                        const raw = execSync(
+                            `tmux capture-pane -t "${activeSession}" -p -e -S -50 2>/dev/null`,
+                            { encoding: 'utf8', timeout: 1000 }
+                        );
+
+                        // Extract suggestion ONLY (dim text after ❯)
+                        const rawLines = raw.split('\n');
+                        for (let i = rawLines.length - 1; i >= 0; i--) {
+                            const rl = rawLines[i];
+                            if (!rl.includes('❯') && !rl.includes('>')) continue;
+
+                            // Check for dim text = suggestion
+                            if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
+                                let sugText = rl.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
+                                if (sugText.startsWith('> ')) sugText = sugText.substring(2).trim();
+                                if (sugText.startsWith('❯ ')) sugText = sugText.substring(2).trim();
+                                if (sugText && sugText.length > 2) {
+                                    suggestion = sugText;
+                                    console.log('[SUGGESTION]', suggestion.substring(0, 50));
+                                }
+                            }
+                            break;
+                        }
+                    } catch (e) {
+                        // Ignore tmux errors
+                    }
                 } else {
                     // FALLBACK: Use tmux capture if .jsonl not found
                     console.log('[JSONL] Fallback to tmux capture');

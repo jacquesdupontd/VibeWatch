@@ -790,8 +790,9 @@ static void command_marquee_stopped(Animation *animation, bool finished, void *c
     property_animation_destroy(s_command_marquee_anim);
     s_command_marquee_anim = NULL;
   }
-  // Instant restart for seamless infinite scroll (no delay)
+  // Reset position to start for seamless loop
   if (finished && s_clean_command_layer && s_last_tool[0]) {
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 600, 16));
     start_command_marquee();
   }
 }
@@ -802,8 +803,9 @@ static void prompt_marquee_stopped(Animation *animation, bool finished, void *co
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
   }
-  // Instant restart for seamless infinite scroll (no delay)
+  // Reset position to start for seamless loop
   if (finished && s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 600, 16));
     start_prompt_marquee();
   }
 }
@@ -1109,22 +1111,36 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         // Start smooth scroll animation
         start_claude_scroll();
       }
+      // Track last command to avoid restarting marquee on same text
+      static char s_last_command_displayed[256] = "";
+
       if (s_clean_command_layer) {
-        text_layer_set_text(s_clean_command_layer, s_last_tool);
-        // Start marquee scroll if text is too long
-        start_command_marquee();
-      }
-      if (s_clean_prompt_layer) {
-        // Show suggestion if available, else user command
-        if (s_suggestion[0]) {
-          text_layer_set_text(s_clean_prompt_layer, s_suggestion);
-          text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
-        } else if (s_user_cmd[0]) {
-          text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
-          text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+        // Only restart marquee if text actually changed
+        if (strcmp(s_last_tool, s_last_command_displayed) != 0) {
+          strncpy(s_last_command_displayed, s_last_tool, sizeof(s_last_command_displayed) - 1);
+          text_layer_set_text(s_clean_command_layer, s_last_tool);
+          start_command_marquee();
         }
-        // Start marquee scroll if text is too long
-        start_prompt_marquee();
+      }
+      // Track last prompt to avoid restarting marquee on same text
+      static char s_last_prompt_displayed[256] = "";
+
+      if (s_clean_prompt_layer) {
+        const char *current_text = s_suggestion[0] ? s_suggestion : s_user_cmd;
+
+        // Only restart marquee if text actually changed
+        if (strcmp(current_text, s_last_prompt_displayed) != 0) {
+          strncpy(s_last_prompt_displayed, current_text, sizeof(s_last_prompt_displayed) - 1);
+
+          if (s_suggestion[0]) {
+            text_layer_set_text(s_clean_prompt_layer, s_suggestion);
+            text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
+          } else if (s_user_cmd[0]) {
+            text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
+            text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+          }
+          start_prompt_marquee();
+        }
       }
       if (s_clean_status_layer) {
         // Set status with appropriate color
