@@ -3,6 +3,13 @@
 static Window *s_window;
 static Layer *s_canvas;
 static TextLayer *s_prompt_layer;
+
+// CLEAN mode TextLayers for PropertyAnimation
+static TextLayer *s_clean_claude_layer = NULL;
+static TextLayer *s_clean_command_layer = NULL;
+static TextLayer *s_clean_prompt_layer = NULL;
+static TextLayer *s_clean_status_layer = NULL;
+
 static char s_buffer[2048];
 static char s_prev_buffer[2048];
 static bool s_has_prompt = false;
@@ -591,10 +598,28 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     return;
   }
 
-  // CLEAN mode - structured display
+  // CLEAN mode - structured display with TextLayers
   if (s_display_mode == MODE_CLEAN) {
-    draw_clean_mode(ctx, bounds);
+    // Fill background
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+    // Show CLEAN layers, hide canvas drawings
+    if (s_clean_claude_layer) {
+      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_command_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
+    }
     return;
+  }
+
+  // Hide CLEAN layers in other modes
+  if (s_clean_claude_layer) {
+    layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), true);
+    layer_set_hidden(text_layer_get_layer(s_clean_command_layer), true);
+    layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), true);
+    layer_set_hidden(text_layer_get_layer(s_clean_status_layer), true);
   }
 
   // VERBOSE mode - streaming display (original)
@@ -797,6 +822,33 @@ static void inbox_received_callback(DictionaryIterator *iterator,
             strncpy(s_status, p, sizeof(s_status) - 1);
             s_status[sizeof(s_status) - 1] = '\0';
           }
+        }
+      }
+
+      // Update TextLayers with new content
+      if (s_clean_claude_layer) {
+        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+      }
+      if (s_clean_command_layer) {
+        text_layer_set_text(s_clean_command_layer, s_last_tool);
+      }
+      if (s_clean_prompt_layer) {
+        // Show suggestion if available, else user command
+        if (s_suggestion[0]) {
+          text_layer_set_text(s_clean_prompt_layer, s_suggestion);
+          text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
+        } else if (s_user_cmd[0]) {
+          text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
+          text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+        }
+      }
+      if (s_clean_status_layer) {
+        // Set status with appropriate color
+        text_layer_set_text(s_clean_status_layer, s_task_running ? s_active_task : s_status);
+        if (s_task_running) {
+          text_layer_set_background_color(s_clean_status_layer, GColorPurple);
+        } else {
+          text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
         }
       }
 
@@ -1087,6 +1139,70 @@ static void click_config_provider(void *ctx) {
   window_long_click_subscribe(BUTTON_ID_SELECT, 500, select_long_handler, NULL);
 }
 
+// Create CLEAN mode TextLayers for PropertyAnimation
+static void create_clean_layers() {
+  if (s_clean_claude_layer) return;  // Already created
+
+  Layer *root = window_get_root_layer(s_window);
+  GRect bounds = layer_get_bounds(root);
+
+  // Claude text layer - large for scrolling
+  s_clean_claude_layer = text_layer_create(GRect(4, 2, bounds.size.w - 8, 2000));
+  text_layer_set_background_color(s_clean_claude_layer, GColorBlack);
+  text_layer_set_text_color(s_clean_claude_layer, GColorPurple);
+  text_layer_set_font(s_clean_claude_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_overflow_mode(s_clean_claude_layer, GTextOverflowModeWordWrap);
+  layer_add_child(root, text_layer_get_layer(s_clean_claude_layer));
+
+  // Command layer
+  s_clean_command_layer = text_layer_create(GRect(4, 100, bounds.size.w - 8, 16));
+  text_layer_set_background_color(s_clean_command_layer, GColorBlack);
+  text_layer_set_text_color(s_clean_command_layer, GColorCyan);
+  text_layer_set_font(s_clean_command_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  layer_add_child(root, text_layer_get_layer(s_clean_command_layer));
+
+  // Prompt layer
+  s_clean_prompt_layer = text_layer_create(GRect(4, 132, bounds.size.w - 8, 16));
+  text_layer_set_background_color(s_clean_prompt_layer, GColorBlack);
+  text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+  text_layer_set_font(s_clean_prompt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  layer_add_child(root, text_layer_get_layer(s_clean_prompt_layer));
+
+  // Status layer
+  s_clean_status_layer = text_layer_create(GRect(0, bounds.size.h - 18, bounds.size.w, 18));
+  text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
+  text_layer_set_text_color(s_clean_status_layer, GColorWhite);
+  text_layer_set_font(s_clean_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
+  layer_add_child(root, text_layer_get_layer(s_clean_status_layer));
+
+  // Hide all initially
+  layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), true);
+  layer_set_hidden(text_layer_get_layer(s_clean_command_layer), true);
+  layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), true);
+  layer_set_hidden(text_layer_get_layer(s_clean_status_layer), true);
+}
+
+// Destroy CLEAN mode layers
+static void destroy_clean_layers() {
+  if (s_clean_claude_layer) {
+    text_layer_destroy(s_clean_claude_layer);
+    s_clean_claude_layer = NULL;
+  }
+  if (s_clean_command_layer) {
+    text_layer_destroy(s_clean_command_layer);
+    s_clean_command_layer = NULL;
+  }
+  if (s_clean_prompt_layer) {
+    text_layer_destroy(s_clean_prompt_layer);
+    s_clean_prompt_layer = NULL;
+  }
+  if (s_clean_status_layer) {
+    text_layer_destroy(s_clean_status_layer);
+    s_clean_status_layer = NULL;
+  }
+}
+
 static void window_load(Window *window) {
   Layer *wl = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(wl);
@@ -1111,6 +1227,9 @@ static void window_load(Window *window) {
   s_chars_shown = 0;
   start_streaming();
   s_cursor_timer = app_timer_register(250, blink_tick, NULL);
+
+  // Create CLEAN mode layers
+  create_clean_layers();
 }
 
 static void window_unload(Window *window) {
@@ -1118,6 +1237,7 @@ static void window_unload(Window *window) {
     app_timer_cancel(s_cursor_timer);
   if (s_stream_timer)
     app_timer_cancel(s_stream_timer);
+  destroy_clean_layers();
   layer_destroy(s_canvas);
   text_layer_destroy(s_prompt_layer);
 }
