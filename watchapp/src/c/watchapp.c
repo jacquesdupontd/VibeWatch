@@ -364,12 +364,37 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   int content_w = bounds.size.w - 8;
   if (content_w < 50) content_w = 50;  // Safety minimum
 
-  // ===== 1. Draw Claude text (green) - simple, no fancy scroll =====
+  // ===== 1. Draw Claude text (green) with gentle scroll =====
   if (s_claude_summary[0]) {
+    int len = strlen(s_claude_summary);
+    int offset = 0;
+
+    // Only scroll if text is long enough
+    if (len > 200) {
+      // Simple character-based scroll: cycle through text
+      int cycle = len - 150;  // How many chars to scroll through
+      if (cycle > 0) {
+        offset = (s_anim_counter * 3) % (cycle + 30);  // +30 for pause
+        if (offset > cycle) offset = cycle;  // Pause at end
+      }
+    }
+
+    // Find word boundary for offset
+    if (offset > 0 && offset < len) {
+      while (offset > 0 && s_claude_summary[offset] != ' ') offset--;
+      if (s_claude_summary[offset] == ' ') offset++;
+    }
+
     graphics_context_set_text_color(ctx, GColorMintGreen);
-    graphics_draw_text(ctx, s_claude_summary, body,
+    graphics_draw_text(ctx, s_claude_summary + offset, body,
         GRect(4, 2, content_w, content_h),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+    // Scroll indicator if scrolling
+    if (offset > 0) {
+      graphics_context_set_fill_color(ctx, GColorYellow);
+      graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 4, 4, 4), 0, GCornerNone);
+    }
   }
 
   // ===== 2. Last tool (cyan) - ABOVE separator line, with MARQUEE =====
