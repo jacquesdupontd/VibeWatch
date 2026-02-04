@@ -2,6 +2,7 @@ const { execSync, exec } = require('child_process');
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const PORT = 8080;
 const POLL_MS = 400;
@@ -346,25 +347,24 @@ function findTranscriptFile(sessionName) {
     return null;
 }
 
-// Format tool_use into compact string (stolen from other Claude's parser)
+// Format tool_use into compact string - ASCII only for Pebble compatibility
 function formatToolUse(name, input) {
     switch (name) {
         case 'Bash': {
             let cmd = input?.command || '';
-            // Compact: remove cd, show just the command
             cmd = cmd.replace(/cd\s+[^\s&|;]+\s*[;&|]*\s*/g, '').trim();
-            if (cmd.length > 40) cmd = cmd.substring(0, 37) + '...';
-            return '$ ' + (cmd || '(empty)');
+            if (cmd.length > 35) cmd = cmd.substring(0, 32) + '...';
+            return '$ ' + (cmd || 'running');
         }
-        case 'Read': return '◎ read ' + (input?.file_path || '').split('/').pop();
-        case 'Write': return '✎ write ' + (input?.file_path || '').split('/').pop();
-        case 'Edit': return '✎ edit ' + (input?.file_path || '').split('/').pop();
-        case 'Grep': return '⌕ grep "' + (input?.pattern || '').substring(0, 20) + '"';
-        case 'Glob': return '⌕ glob ' + (input?.pattern || '');
-        case 'Task': return '◇ agent: ' + (input?.description || '').substring(0, 30);
-        case 'WebFetch': return '↓ fetch ' + (input?.url || '').substring(0, 30);
-        case 'WebSearch': return '◈ search "' + (input?.query || '').substring(0, 25) + '"';
-        default: return '⚙ ' + name;
+        case 'Read': return 'READ ' + (input?.file_path || '').split('/').pop();
+        case 'Write': return 'WRITE ' + (input?.file_path || '').split('/').pop();
+        case 'Edit': return 'EDIT ' + (input?.file_path || '').split('/').pop();
+        case 'Grep': return 'GREP "' + (input?.pattern || '').substring(0, 20) + '"';
+        case 'Glob': return 'GLOB ' + (input?.pattern || '');
+        case 'Task': return 'AGENT ' + (input?.description || '').substring(0, 25);
+        case 'WebFetch': return 'FETCH ' + (input?.url || '').substring(0, 25);
+        case 'WebSearch': return 'SEARCH "' + (input?.query || '').substring(0, 20) + '"';
+        default: return name.toUpperCase();
     }
 }
 
@@ -574,72 +574,110 @@ function extractRealtimeTool(raw) {
     return null;
 }
 
-// Extract real-time assistant text from tmux (bullets and text)
-// ONLY capture Claude's conversational text, NOT tool output
+// Extract assistant text from JSONL transcript (CLEAN approach)
+// Much cleaner than parsing tmux terminal output
+function extractTextFromJSONL(sessionPath) {
+    try {
+        const projectDir = getProjectDir(sessionPath);
+        if (!projectDir) return null;
+
+        // Find most recent JSONL file
+        const files = fs.readdirSync(projectDir)
+            .filter(f => f.endsWith('.jsonl'))
+            .map(f => ({ name: f, mtime: fs.statSync(path.join(projectDir, f)).mtime }))
+            .sort((a, b) => b.mtime - a.mtime);
+
+        if (files.length === 0) return null;
+
+        const jsonlPath = path.join(projectDir, files[0].name);
+        const content = fs.readFileSync(jsonlPath, 'utf8');
+        const lines = content.trim().split('\n');
+
+        // Get last few assistant messages with text content
+        const textParts = [];
+        for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
+            try {
+                const entry = JSON.parse(lines[i]);
+                if (entry.type === 'assistant' && entry.message?.content) {
+                    // Extract text blocks from content array
+                    for (const block of entry.message.content) {
+                        if (block.type === 'text' && block.text) {
+                            // Clean up the text - remove markdown formatting
+                            let text = block.text
+                                .replace(/\*\*/g, '')  // Remove bold
+                                .replace(/`/g, '')     // Remove code ticks
+                                .replace(/\n+/g, ' ')  // Newlines to spaces
+                                .trim();
+                            if (text.length > 20) {
+                                textParts.unshift(text);
+                            }
+                        }
+                    }
+                    // Get last 2-3 messages worth of text
+                    if (textParts.length >= 3) break;
+                }
+            } catch (e) { /* skip malformed lines */ }
+        }
+
+        if (textParts.length > 0) {
+            let summary = textParts.join(' ');
+            // Show END of text (most recent)
+            if (summary.length > 800) {
+                summary = '...' + summary.substring(summary.length - 797);
+            }
+            return summary;
+        }
+    } catch (e) {
+        console.error('JSONL extraction error:', e.message);
+    }
+    return null;
+}
+
+// Get Claude project directory from session working directory
+function getProjectDir(sessionPath) {
+    try {
+        // Encode path like Claude does: /Users/foo/bar -> -Users-foo-bar
+        const encoded = sessionPath.replace(/\//g, '-').replace(/^-/, '-');
+        const projectDir = path.join(os.homedir(), '.claude', 'projects', encoded);
+        if (fs.existsSync(projectDir)) {
+            return projectDir;
+        }
+    } catch (e) {}
+    return null;
+}
+
+// Get working directory of a tmux session
+function getSessionCwd(sessionName) {
+    try {
+        return execSync(
+            `tmux display-message -t "${sessionName}" -p "#{pane_current_path}" 2>/dev/null`,
+            { encoding: 'utf8' }
+        ).trim();
+    } catch (e) {
+        return null;
+    }
+}
+
+// Fallback: Extract from tmux if JSONL not available
 function extractRealtimeText(raw) {
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
     const lines = cleaned.split('\n');
-
-    // Find Claude paragraphs: ONLY ⏺ lines that are NOT tool calls
-    // Don't include continuation lines to avoid capturing tool output
     const paragraphs = [];
-    let inToolOutput = false;
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+    for (const line of lines) {
         const trimmed = line.trim();
-
         if (!trimmed) continue;
+        if (!trimmed.startsWith('⏺')) continue;
 
-        // Skip UI noise
-        if (/^[-=─━]{3,}/.test(trimmed)) continue;
-        if (/Context left|esc to interrupt|ctrl\+[a-z]/.test(trimmed)) continue;
-        if (/^\d+\s+files?\s+\+/.test(trimmed)) continue;
-        if (/^[●✢✳✶·]/.test(trimmed)) continue;
-        if (/^❯/.test(trimmed)) continue;
+        // Skip tool calls
+        if (/^⏺\s*(Read|Write|Edit|Update|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP|NotebookEdit)\s*[\(\d]/i.test(trimmed)) continue;
+        if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob|Searched|Found)\s+\d+/i.test(trimmed)) continue;
+        if (/\(ctrl\+[a-z]\s+to/i.test(trimmed)) continue;
 
-        // Tool output marker - everything after this until next ⏺ is tool output
-        if (/^⎿/.test(trimmed)) {
-            inToolOutput = true;
-            continue;
-        }
-
-        // ⏺ line
-        if (trimmed.startsWith('⏺')) {
-            inToolOutput = false;  // New Claude action, reset tool output flag
-
-            // Skip tool calls and tool result summaries
-            if (/^⏺\s*(Read|Write|Edit|Update|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP|NotebookEdit)\s*[\(\d]/i.test(trimmed)) {
-                inToolOutput = true;
-                continue;
-            }
-            if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob)\s+\d+\s+(file|line|pattern)/i.test(trimmed)) {
-                inToolOutput = true;
-                continue;
-            }
-            // Skip tool result summaries like "Searched for X pattern", "Found X files"
-            if (/^⏺\s*(Searched|Found|Created|Deleted|Modified|Installed|Built)\s+(for\s+)?\d+/i.test(trimmed)) {
-                inToolOutput = true;
-                continue;
-            }
-            // Skip lines with (ctrl+o to expand) - these are collapsed tool outputs
-            if (/\(ctrl\+[a-z]\s+to\s+(expand|collapse)\)/i.test(trimmed)) {
-                continue;
-            }
-
-            // This is Claude's conversational text!
-            let text = trimmed.replace(/^⏺\s*/, '').trim();
-            if (text.length > 10) {
-                paragraphs.push(text);
-            }
-            continue;
-        }
-
-        // Skip everything else (tool output, indented content, etc.)
-        // We ONLY want ⏺ conversational paragraphs
+        const text = trimmed.replace(/^⏺\s*/, '').trim();
+        if (text.length > 10) paragraphs.push(text);
     }
 
-    // Take the last few paragraphs (most recent Claude text)
     if (paragraphs.length > 0) {
         const recent = paragraphs.slice(-3);
         let summary = recent.join(' ');
@@ -678,6 +716,139 @@ function extractUserPrompt(raw) {
         }
     }
     return null;
+}
+
+// ============================================================
+// STREAM-JSON PARSING (for Claude launched with --output-format stream-json)
+// ============================================================
+
+// Parse Claude's stream-json output from tmux capture
+// Returns: { summary, status, lastTool, userPrompt, suggestion }
+function parseStreamJSON(raw) {
+    const result = {
+        summary: '',
+        status: 'Ready',
+        lastTool: '',
+        userPrompt: '',
+        suggestion: null
+    };
+
+    // Clean ANSI codes
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    const textParts = [];
+    let lastToolUse = null;
+    let isThinking = false;
+
+    // Parse each line as potential JSON
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('{')) continue;
+
+        try {
+            const event = JSON.parse(trimmed);
+
+            // Assistant message with content
+            if (event.type === 'assistant' && event.message?.content) {
+                for (const block of event.message.content) {
+                    // Text content
+                    if (block.type === 'text' && block.text) {
+                        let text = block.text
+                            .replace(/\*\*/g, '')  // Remove markdown bold
+                            .replace(/`/g, '')     // Remove code ticks
+                            .replace(/\n+/g, ' ')  // Newlines to spaces
+                            .trim();
+                        if (text.length > 10) {
+                            textParts.push(text);
+                        }
+                    }
+                    // Tool use
+                    if (block.type === 'tool_use' && block.name) {
+                        lastToolUse = formatToolUse(block.name, block.input);
+                    }
+                }
+
+                // Check stop_reason for status
+                if (event.message.stop_reason === 'end_turn') {
+                    result.status = 'Done';
+                    isThinking = false;
+                } else if (event.message.stop_reason === 'tool_use') {
+                    result.status = 'Working...';
+                }
+            }
+
+            // Thinking/streaming indicator (content_block_start with thinking)
+            if (event.type === 'content_block_start') {
+                isThinking = true;
+            }
+
+            // User message (human turn)
+            if (event.type === 'human' || (event.type === 'user' && event.message)) {
+                const content = event.message?.content || event.content;
+                if (typeof content === 'string' && content.length > 3) {
+                    result.userPrompt = content;
+                } else if (Array.isArray(content)) {
+                    for (const item of content) {
+                        if (item.type === 'text' && item.text) {
+                            result.userPrompt = item.text;
+                            break;
+                        }
+                    }
+                }
+            }
+
+        } catch (e) {
+            // Not valid JSON, might be regular terminal output
+            // Check for thinking words in non-JSON lines
+            const thinkMatch = trimmed.match(/[·✳✶✽*]?\s*([A-Z][a-z]+)(\.{3}|…)/);
+            if (thinkMatch && !STATUS_BLACKLIST.includes(thinkMatch[1])) {
+                result.status = thinkMatch[1] + '...';
+                isThinking = true;
+            }
+        }
+    }
+
+    // Build summary from text parts (show most recent)
+    if (textParts.length > 0) {
+        const recent = textParts.slice(-3);
+        result.summary = recent.join(' ');
+        if (result.summary.length > 800) {
+            result.summary = '...' + result.summary.substring(result.summary.length - 797);
+        }
+    }
+
+    if (lastToolUse) {
+        result.lastTool = lastToolUse;
+    }
+
+    // Truncate user prompt
+    if (result.userPrompt && result.userPrompt.length > 50) {
+        result.userPrompt = '...' + result.userPrompt.substring(result.userPrompt.length - 47);
+    }
+
+    return result;
+}
+
+// Detect if tmux output contains stream-json format
+function isStreamJSONOutput(raw) {
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    // Check if we have JSON lines with Claude event types
+    let jsonCount = 0;
+    for (const line of lines.slice(-50)) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                const obj = JSON.parse(trimmed);
+                if (obj.type && ['assistant', 'user', 'human', 'result', 'init'].includes(obj.type)) {
+                    jsonCount++;
+                }
+            } catch (e) {}
+        }
+    }
+    return jsonCount >= 3;  // At least 3 JSON events = stream-json mode
 }
 
 // Session management
@@ -731,74 +902,94 @@ wss.on('connection', (ws) => {
                     `tmux capture-pane -t "${activeSession}" -p -e -S -200 2>/dev/null`,
                     { encoding: 'utf8', timeout: 2000 }
                 );
-                const promptType = detectPrompt(raw);
-                let screen = extractClaude(raw);
 
+                // Check if output is stream-json format
+                const isStreamJSON = isStreamJSONOutput(raw);
+                let cleanData;
                 let suggestion = null;
-                const rawLines = raw.split('\n');
-                let finalScreenLines = screen.split('\n');
 
-                for (let i = rawLines.length - 1; i >= 0; i--) {
-                    const rl = rawLines[i];
-                    if (!rl.includes('❯') && !rl.includes('>')) continue;
-                    if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
-                        let newSug = clean(rl).trim();
-                        if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
-                        if (newSug && newSug.length > 2) suggestion = newSug;
-                        while (finalScreenLines.length > 0) {
-                            const lastL = finalScreenLines[finalScreenLines.length - 1];
-                            if (/(\[ME\]|[❯>])/.test(lastL)) finalScreenLines.pop();
-                            else break;
+                if (isStreamJSON) {
+                    // Parse stream-json directly - much cleaner!
+                    cleanData = parseStreamJSON(raw);
+                    // Add suggestion field if present
+                    if (cleanData.suggestion) {
+                        suggestion = cleanData.suggestion;
+                    }
+                } else {
+                    // Fallback to terminal parsing (normal Claude mode)
+                    const transcriptPath = findTranscriptFile(activeSession);
+                    if (transcriptPath) {
+                        cleanData = extractCleanDataFromTranscript(transcriptPath);
+                    } else {
+                        cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
+                    }
+
+                    // Override with real-time data from tmux
+                    const realtimeStatus = extractRealtimeStatus(raw);
+                    if (realtimeStatus) {
+                        cleanData.status = realtimeStatus;
+                    }
+
+                    const realtimeTool = extractRealtimeTool(raw);
+                    if (realtimeTool) {
+                        cleanData.lastTool = realtimeTool;
+                    }
+
+                    // Use JSONL for text if available
+                    const sessionCwd = getSessionCwd(activeSession);
+                    if (sessionCwd) {
+                        const jsonlText = extractTextFromJSONL(sessionCwd);
+                        if (jsonlText) {
+                            cleanData.summary = jsonlText;
                         }
                     }
-                    break;
+                    if (!cleanData.summary || cleanData.summary.length < 20) {
+                        const realtimeText = extractRealtimeText(raw);
+                        if (realtimeText) {
+                            cleanData.summary = realtimeText;
+                        }
+                    }
+
+                    // Detect suggestions from terminal
+                    const rawLines = raw.split('\n');
+                    for (let i = rawLines.length - 1; i >= 0; i--) {
+                        const rl = rawLines[i];
+                        if (!rl.includes('❯') && !rl.includes('>')) continue;
+                        if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
+                            let newSug = clean(rl).trim();
+                            if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
+                            if (newSug && newSug.length > 2) suggestion = newSug;
+                        }
+                        break;
+                    }
                 }
-                screen = finalScreenLines.join('\n');
+
+                // Build message for watch
+                const promptType = detectPrompt(raw);
+                let screen = isStreamJSON ? '' : extractClaude(raw);
 
                 const msg = { type: 'output', content: screen };
                 if (promptType) msg.prompt = promptType;
                 if (suggestion) msg.suggestion = suggestion;
 
-                // Extract structured data for CLEAN mode
-                let cleanData;
-                const transcriptPath = findTranscriptFile(activeSession);
-                if (transcriptPath) {
-                    cleanData = extractCleanDataFromTranscript(transcriptPath);
-                } else {
-                    cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
+                // Ensure userCmd is set from cleanData
+                if (!cleanData.userCmd) {
+                    cleanData.userCmd = extractUserPrompt(raw) || '';
                 }
 
-                // Override with real-time data from tmux (JSONL is delayed during streaming)
-                const realtimeStatus = extractRealtimeStatus(raw);
-                if (realtimeStatus) {
-                    cleanData.status = realtimeStatus;
-                }
-
-                const realtimeTool = extractRealtimeTool(raw);
-                if (realtimeTool) {
-                    cleanData.lastTool = realtimeTool;
-                }
-
-                const realtimeText = extractRealtimeText(raw);
-                if (realtimeText) {
-                    cleanData.summary = realtimeText;
-                }
-
-                // Extract user prompt from tmux if not found in JSONL
-                if (!cleanData.userCmd || cleanData.userCmd.length < 5) {
-                    const userPrompt = extractUserPrompt(raw);
-                    if (userPrompt) {
-                        cleanData.userCmd = userPrompt;
-                    }
+                // Add suggestion to cleanData for CLEAN mode
+                if (suggestion) {
+                    cleanData.suggestion = suggestion;
                 }
 
                 // Debug: log cleanData
-                console.log('CLEAN:', JSON.stringify(cleanData));
+                console.log('CLEAN:', JSON.stringify(cleanData).substring(0, 150));
 
                 if (cleanData) msg.cleanData = cleanData;
 
                 const msgStr = JSON.stringify(msg);
-                if (msgStr !== lastSent && screen.length > 0) {
+                // Send if cleanData has content OR if screen has content (stream-json may have no screen)
+                if (msgStr !== lastSent && (screen.length > 0 || cleanData.summary)) {
                     if (ws.readyState === WebSocket.OPEN) ws.send(msgStr);
                     lastSent = msgStr;
                 }

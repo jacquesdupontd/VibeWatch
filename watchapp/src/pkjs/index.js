@@ -69,8 +69,8 @@ Pebble.addEventListener('ready', function() {
                 function sanitize(s) {
                     return (s || "").replace(/\|/g, " ");
                 }
-                // Format: CLEAN:userCmd|summary|status|lastTool
-                var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool);
+                // Format: CLEAN:userCmd|summary|status|lastTool|suggestion
+                var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool) + "|" + sanitize(cd.suggestion);
                 // Send as separate message after a small delay
                 setTimeout(function() {
                     Pebble.sendAppMessage({ "TERMINAL_DATA": cleanStr }, function(){}, function(){});

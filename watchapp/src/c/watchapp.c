@@ -28,8 +28,9 @@ static char s_user_cmd[128] = "";
 static char s_claude_summary[1024] = "";  // Larger buffer for multiple paragraphs
 static char s_status[32] = "Ready";
 static char s_last_tool[64] = "";
+static char s_suggestion[128] = "";  // Ghost text suggestion
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
-static int s_clean_total_h = 0; // Total content height in CLEAN mode
+static int s_marquee_offset = 0;  // For scrolling text animation
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -342,90 +343,125 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   GFont body = fonts_get_system_font(FONT_KEY_GOTHIC_14);
   GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
 
-  // Fixed zones at bottom
-  int status_h = 18;
-  int tool_h = s_last_tool[0] ? 16 : 0;
-  int user_h = 0;  // Disabled - extraction unreliable
-  int fixed_bottom = status_h + tool_h + 4;
+  // LAYOUT (bottom to top):
+  // 1. Status bar (18px) - bottom
+  // 2. Prompt/Suggestion (16px) - just above status
+  // --- separator line ---
+  // 3. Last tool (16px) - ABOVE the line
+  // 4. Claude text (rest) - top
 
-  // Content zone (visible area for text)
-  int content_h = bounds.size.h - fixed_bottom;
+  int status_h = 18;
+  int prompt_h = 16;
+  int tool_h = s_last_tool[0] ? 16 : 0;
+  int below_line = status_h + prompt_h;  // Below separator
+  int above_line = tool_h;               // Above separator
+
+  // Content zone for Claude text (everything above the tool line)
+  int content_h = bounds.size.h - below_line - above_line - 4;
   int content_w = bounds.size.w - 8;
 
-  // Draw Claude text (green) - show END of text by default (like VERBOSE mode)
+  // ===== 1. Draw Claude text (green) at TOP =====
   if (s_claude_summary[0]) {
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_rect(ctx, GRect(0, 0, bounds.size.w, content_h), 0, GCornerNone);
-
     int len = strlen(s_claude_summary);
-
-    // s_clean_scroll = -1 means "auto-scroll to end" (default)
-    // s_clean_scroll >= 0 means manual offset from start
     int start;
     if (s_clean_scroll < 0) {
-      // Auto: show END of text - calculate offset to show last ~150 chars
       start = len > 150 ? len - 150 : 0;
     } else {
       start = s_clean_scroll;
       if (start >= len) start = len > 150 ? len - 150 : 0;
     }
-
-    // Find word boundary
+    // Word boundary
     if (start > 0 && start < len) {
       while (start > 0 && s_claude_summary[start] != ' ') start--;
       if (s_claude_summary[start] == ' ') start++;
     }
-
-    // Draw from offset
     graphics_context_set_text_color(ctx, GColorMintGreen);
     graphics_draw_text(ctx, s_claude_summary + start, body,
         GRect(4, 2, content_w, content_h - 4),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-
-    // Scroll indicators
+    // Scroll indicator
     if (start > 0) {
-      // Dot at top - can scroll UP to see earlier content
       graphics_context_set_fill_color(ctx, GColorCyan);
       graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 4, 4, 4), 0, GCornerNone);
     }
   }
 
-  // Clear and draw fixed bottom section
-  int y = bounds.size.h - fixed_bottom;
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(0, y, bounds.size.w, fixed_bottom), 0, GCornerNone);
-
-  // Separator line
-  graphics_context_set_stroke_color(ctx, GColorDarkGray);
-  graphics_draw_line(ctx, GPoint(10, y), GPoint(bounds.size.w - 10, y));
-  y += 2;
-
-  // Last tool (cyan)
+  // ===== 2. Last tool (cyan) - ABOVE separator line =====
+  int tool_y = content_h;
   if (s_last_tool[0]) {
     graphics_context_set_text_color(ctx, GColorCyan);
     graphics_draw_text(ctx, s_last_tool, small,
-        GRect(4, y, bounds.size.w - 8, tool_h),
+        GRect(4, tool_y, bounds.size.w - 8, tool_h),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    y += tool_h;
   }
 
-  // User command (yellow)
-  if (s_user_cmd[0]) {
+  // ===== Separator line (below tool, above prompt) =====
+  int line_y = content_h + tool_h + 2;
+  graphics_context_set_stroke_color(ctx, GColorDarkGray);
+  graphics_draw_line(ctx, GPoint(10, line_y), GPoint(bounds.size.w - 10, line_y));
+
+  // ===== 3. Prompt OR Suggestion (yellow) - BELOW line, ABOVE status =====
+  int prompt_y = line_y + 2;
+  bool has_suggestion = (s_suggestion[0] != '\0');
+  static char prompt_buf[48];
+
+  if (has_suggestion) {
+    // SUGGESTION: Blinking + Marquee scroll
+    int sug_len = strlen(s_suggestion);
+
+    // Marquee: scroll if text is longer than visible area (~30 chars)
+    const char *scroll_text = s_suggestion;
+    if (sug_len > 30) {
+      int scroll_pos = s_marquee_offset % (sug_len + 5);
+      if (scroll_pos < sug_len) {
+        int show_len = sug_len - scroll_pos;
+        if (show_len > 35) show_len = 35;
+        strncpy(prompt_buf, s_suggestion + scroll_pos, show_len);
+        prompt_buf[show_len] = '\0';
+      } else {
+        strncpy(prompt_buf, s_suggestion, 35);
+        prompt_buf[35] = '\0';
+      }
+      scroll_text = prompt_buf;
+    }
+
+    // Blink: alternate yellow/dim
+    if (s_cursor_visible) {
+      graphics_context_set_text_color(ctx, GColorYellow);
+    } else {
+      graphics_context_set_text_color(ctx, GColorLightGray);
+    }
+    graphics_draw_text(ctx, scroll_text, small,
+        GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  } else if (s_user_cmd[0]) {
+    // User prompt: show END with "..." prefix
     graphics_context_set_text_color(ctx, GColorYellow);
     int len = strlen(s_user_cmd);
-    const char *display = s_user_cmd;
-    if (len > 40) display = s_user_cmd + len - 37;
-    graphics_draw_text(ctx, display, small,
-        GRect(4, y, bounds.size.w - 8, user_h),
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    y += user_h;
+    if (len > 32) {
+      snprintf(prompt_buf, sizeof(prompt_buf), "...%s", s_user_cmd + len - 29);
+      graphics_draw_text(ctx, prompt_buf, small,
+          GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    } else {
+      graphics_draw_text(ctx, s_user_cmd, small,
+          GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    }
   }
 
   // Status bar (colored based on status)
   int status_y = bounds.size.h - status_h;
   GColor status_bg = GColorDarkGray;
   GColor status_fg = GColorWhite;
-  if (strstr(s_status, "...") || strstr(s_status, "Working")) {
+  const char *status_text = s_status;
+
+  // If suggestion present, show "SEL = accept" hint
+  if (has_suggestion) {
+    status_bg = GColorCobaltBlue;
+    status_fg = GColorWhite;
+    status_text = "SEL = accept";
+  } else if (strstr(s_status, "...") || strstr(s_status, "Working")) {
     status_bg = GColorOrange;
     status_fg = GColorBlack;
   } else if (strstr(s_status, "Done") || strstr(s_status, "Ready")) {
@@ -439,7 +475,7 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   graphics_context_set_fill_color(ctx, status_bg);
   graphics_fill_rect(ctx, GRect(0, status_y, bounds.size.w, status_h), 0, GCornerNone);
   graphics_context_set_text_color(ctx, status_fg);
-  graphics_draw_text(ctx, s_status, small,
+  graphics_draw_text(ctx, status_text, small,
       GRect(4, status_y, bounds.size.w - 8, status_h),
       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
@@ -575,12 +611,15 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   }
 }
 
-// Cursor blink
+// Cursor blink + marquee scroll
 static void cursor_blink(void *data) {
   s_cursor_visible = !s_cursor_visible;
   s_anim_counter++;
-  // Reset at a multiple of 80 (cycle_len) to avoid jumps
-  if (s_anim_counter >= 3200) // 80 * 40
+  // Marquee: increment every 3 blinks (~240ms per char)
+  if (s_anim_counter % 3 == 0) {
+    s_marquee_offset++;
+  }
+  if (s_anim_counter >= 3200)
     s_anim_counter = 0;
   layer_mark_dirty(s_canvas);
   s_cursor_timer = app_timer_register(80, cursor_blink, NULL);
@@ -648,15 +687,16 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       return;
     }
 
-    // CLEAN:cmd|summary|status|tool - structured data for clean mode
+    // CLEAN:cmd|summary|status|tool|suggestion - structured data for clean mode
     if (strncmp(data, "CLEAN:", 6) == 0) {
       // Auto-scroll to end when new content arrives
       s_clean_scroll = -1;
 
-      // Clear buffers first to avoid stale data
+      // Clear buffers first
       s_user_cmd[0] = '\0';
       s_claude_summary[0] = '\0';
       s_last_tool[0] = '\0';
+      s_suggestion[0] = '\0';
 
       const char *p = data + 6;
       const char *sep1 = strchr(p, '|');
@@ -669,7 +709,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         const char *sep2 = strchr(p, '|');
         if (sep2) {
           len = (int)(sep2 - p);
-          if (len > 1023) len = 1023;  // Match buffer size
+          if (len > 1023) len = 1023;
           strncpy(s_claude_summary, p, len);
           s_claude_summary[len] = '\0';
           p = sep2 + 1;
@@ -680,12 +720,24 @@ static void inbox_received_callback(DictionaryIterator *iterator,
             strncpy(s_status, p, len);
             s_status[len] = '\0';
             p = sep3 + 1;
-            strncpy(s_last_tool, p, sizeof(s_last_tool) - 1);
-            s_last_tool[sizeof(s_last_tool) - 1] = '\0';
+            // Parse tool and suggestion
+            const char *sep4 = strchr(p, '|');
+            if (sep4) {
+              len = (int)(sep4 - p);
+              if (len > 63) len = 63;
+              strncpy(s_last_tool, p, len);
+              s_last_tool[len] = '\0';
+              p = sep4 + 1;
+              // Suggestion (5th field)
+              strncpy(s_suggestion, p, sizeof(s_suggestion) - 1);
+              s_suggestion[sizeof(s_suggestion) - 1] = '\0';
+            } else {
+              strncpy(s_last_tool, p, sizeof(s_last_tool) - 1);
+              s_last_tool[sizeof(s_last_tool) - 1] = '\0';
+            }
           } else {
             strncpy(s_status, p, sizeof(s_status) - 1);
             s_status[sizeof(s_status) - 1] = '\0';
-            s_last_tool[0] = '\0';
           }
         }
       }
