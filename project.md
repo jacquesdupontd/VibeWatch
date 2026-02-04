@@ -6,7 +6,7 @@ Afficher en temps reel le terminal **Claude Code** (CLI Anthropic) sur une montr
 
 ## Etat actuel (Fevrier 2026)
 
-### Fonctionnel
+### MODE VERBOSE (original)
 - Affichage colorise du terminal (blanc, bleu, cyan, rouge, vert, jaune, orange, gris)
 - Streaming lettre par lettre avec effet de fade-in progressif (8 derniers chars)
 - Curseur carre clignotant (500ms) aligne avec le texte
@@ -20,6 +20,47 @@ Afficher en temps reel le terminal **Claude Code** (CLI Anthropic) sur une montr
 - Couleurs claires lisibles en mode clair (CobaltBlue, BlueMoon, BulgarianRose, etc.)
 - Auto-scroll vers le bas a chaque nouveau contenu
 - Reconnexion WebSocket automatique (3s)
+
+### MODE CLEAN (nouveau - Fevrier 2026)
+
+**Concept**: Interface structuree ultra-moderne avec animations fluides PropertyAnimation natives Pebble.
+
+**Architecture TextLayers**:
+- Refactoring complet de `graphics_draw_text` vers des `TextLayer` separees
+- Layout pixel-perfect (ecran 144x168px):
+  - Claude (texte IA): 111px @ y:0-111 (zone scrollable avec clipping)
+  - Command (derniere commande): 16px @ y:111-127 (cyan)
+  - Separator line: 2px @ y:127-129 (gris)
+  - Prompt (input utilisateur): 16px @ y:129-145 (blanc/jaune)
+  - Status bar: 18px @ y:150-168 (fond gris fonce)
+
+**Animations PropertyAnimation**:
+- Scroll vertical ultra-smooth avec `property_animation_create_layer_frame()`
+- Vitesse: 20ms par pixel (vitesse de lecture optimale)
+- AnimationCurveLinear pour defilement constant
+- Clipping layer (`layer_set_clips(true)`) pour confiner le texte Claude dans sa zone de 111px
+- Callbacks `.stopped` pour boucles et continuations
+
+**Bridge ameliore**:
+- Format NDJSON stream-json: `CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask`
+- Extraction intelligente du dernier outil utilise (LSP, Read, Edit, etc.)
+- Filtrage des hooks PostToolUse/PreToolUse pour eviter les faux positifs
+- Detection tache active en cours (ex: "Running tests", "Building project")
+- Pas de troncation du texte pour afficher les prompts complets
+
+**Fonctionnel en mode CLEAN**:
+- Affichage structure en 4 zones distinctes (Claude/Command/Prompt/Status)
+- Scroll vertical smooth PropertyAnimation avec clipping parfait
+- UP/DOWN pour scroll manuel (desactive auto-scroll)
+- Couleurs: Violet pour Claude, Cyan pour commande, Blanc pour prompt
+- Status bar coloree selon l'etat (vert=succes, rouge=erreur, gris=en cours)
+- Separator line entre command et prompt pour separation visuelle
+
+**En cours de developpement**:
+- Prompt live typing (voir texte pendant la saisie, pas apres)
+- Marquee scroll horizontal PropertyAnimation pour command/prompt overflow
+- Preservation des retours a la ligne (\n) pour listes et formatage
+- Amelioration lisibilite: couleurs alternatives, separation titres/items
 
 ### Architecture
 
@@ -162,9 +203,97 @@ node server.js   # stdout affiche: Content length, PROMPT DETECTED, SUGGESTION
 - Le Mac peut etre a la maison, le telephone + montre en deplacement
 - Latence ~50-100ms en 4G, imperceptible avec le polling 400ms
 
+## Historique recent des developpements
+
+### Fevrier 2026 - Mode CLEAN avec PropertyAnimation
+
+**Probleme initial**: Mode CLEAN avait des bugs critiques
+- Texte "Running PostToolUse hook" apparaissait comme tache active (faux positif)
+- Scroll saccade (timer-based, pas smooth)
+- Prompt utilisateur tronque a 60 chars avec "..."
+- Pas de scroll UP manuel (plante l'app)
+
+**Solutions implementees**:
+1. **Bridge filtering** (server.js):
+   - Filtrage hooks dans `extractActiveTask()` et `extractUserPrompt()`
+   - Suppression complete de la troncation texte (lignes 414-416, 754-756)
+   - Detection intelligente des taches reelles vs bruit systeme
+
+2. **Refactoring TextLayers** (watchapp.c):
+   - Remplacement complet de `draw_clean_mode()` par systeme TextLayer
+   - Creation `create_clean_layers()` avec 4 TextLayers separees
+   - Layer hierarchy: root > clip_layer > claude_layer (pour clipping)
+   - Destruction propre dans `destroy_clean_layers()`
+
+3. **PropertyAnimation smooth scroll**:
+   - Recherche API Pebble animations (PropertyAnimation, AnimationCurve)
+   - Implementation `start_claude_scroll()` avec animation native
+   - Calcul dynamique duree: `scroll_range * 20ms` (20ms/px)
+   - Callbacks `.stopped` pour gestion fin d'animation
+   - Clipping layer avec `layer_set_clips(true)` pour bordure 111px
+
+4. **Layout pixel-perfect**:
+   - Calcul precis: 111px Claude + 16px Command + 2px Sep + 16px Prompt + 5px gap + 18px Status = 168px
+   - Canvas layer dessine clip bars (rectangles noirs) et separator line
+   - Positionnement exact pour zero debordement
+
+**Resultats**:
+- Scroll ultra-smooth comparable aux apps natives Pebble
+- Pas de debordement de texte (clipping parfait)
+- Architecture propre et maintenable avec TextLayers
+- Base solide pour features futures (marquee, formatage, etc.)
+
+**Branch**: `feature/property-animation`
+
+### Taches en cours (Tasks #22-26)
+
+**#22 - Fix prompt live typing display**
+- Probleme: L'utilisateur ne voit pas son texte pendant qu'il tape (dictee vocale)
+- Solution: Buffer local sur watch qui se met a jour avant envoi bridge
+- Impact: Experience utilisateur immediat, pas de latence percue
+
+**#23 - Fix smooth scroll blocking during typing**
+- Probleme: PropertyAnimation s'arrete quand l'utilisateur saisit du texte
+- Solution: Permettre animation continue ou reprendre auto apres saisie
+- Impact: Fluidite constante de l'interface
+
+**#24 - Implement horizontal marquee for cyan command**
+- Probleme: Texte command cyan ne defilait pas horizontalement (marquee inactif)
+- Solution: PropertyAnimation horizontale comme le vertical scroll
+- Impact: Lisibilite des commandes longues
+
+**#25 - Fix text formatting - preserve line breaks and lists**
+- Probleme: Listes numerotees (1. 2. 3.) toutes sur meme ligne, illisibles
+- Solution: Preserver \n dans bridge et TextLayer, verifier parsing
+- Impact: CRITIQUE pour lisibilite du contenu IA
+
+**#26 - Improve readability with better color scheme**
+- Probleme: Texte violet difficile a lire sur petit ecran, pas de hierarchie visuelle
+- Options:
+  - Tester autres couleurs Pebble (GColorVividViolet, BrilliantRose, etc.)
+  - Alterner clair/fonce par phrase/paragraphe
+  - Differencier titres de liste vs items
+  - Ajouter indicateurs visuels (puces, tirets)
+- Impact: Repousser les limites de lisibilite sur 144x168px
+
+## Vision engineering: Maximiser info sur mini-ecran
+
+**Principe**: Chaque pixel compte. L'ecran 144x168px doit afficher toutes les infos necessaires de maniere ultra-lisible.
+
+**Techniques**:
+- Separation visuelle stricte par zones (couleur + position)
+- Animations fluides pour guider l'oeil (scroll smooth, marquee)
+- Clipping precis pour zero debordement visuel
+- Hierarchie typographique (couleurs, alternance clair/fonce)
+- Formatage preserve (retours ligne, listes, indentation)
+- Feedback immediat (live typing, status en temps reel)
+
+**Objectif**: Rivaliser avec les meilleures apps natives Pebble en termes de polish et utilisabilite.
+
 ## Limites connues
 
 - Buffer watch : 2048 bytes (environ 20-30 lignes de texte)
 - Pas de dictee vocale encore (Dictation API Pebble disponible pour plus tard)
 - L'emulateur QEMU est instable (crashes frequents, CPU 97%)
 - Le bridge ne gere qu'une session tmux a la fois
+- Formatage texte IA encore basique (pas de markdown, pas de listes structurees)

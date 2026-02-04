@@ -5,10 +5,13 @@ static Layer *s_canvas;
 static TextLayer *s_prompt_layer;
 
 // CLEAN mode TextLayers for PropertyAnimation
+static Layer *s_clean_clip_layer = NULL;  // CLIPPING container pour Claude text
 static TextLayer *s_clean_claude_layer = NULL;
 static TextLayer *s_clean_command_layer = NULL;
 static TextLayer *s_clean_prompt_layer = NULL;
 static TextLayer *s_clean_status_layer = NULL;
+static PropertyAnimation *s_claude_scroll_anim = NULL;
+static bool s_auto_scroll_enabled = true;
 
 static char s_buffer[2048];
 static char s_prev_buffer[2048];
@@ -604,9 +607,18 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-    // Show CLEAN layers, hide canvas drawings
-    if (s_clean_claude_layer) {
-      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), false);
+    // CLIP BARS - cache le débordement du texte Claude
+    graphics_fill_rect(ctx, GRect(0, 111, 144, 17), 0, GCornerNone);  // Bar au-dessus command
+    graphics_fill_rect(ctx, GRect(0, 145, 144, 5), 0, GCornerNone);   // Bar au-dessus status
+
+    // SEPARATOR LINE
+    graphics_context_set_stroke_color(ctx, GColorDarkGray);
+    graphics_draw_line(ctx, GPoint(10, 127), GPoint(134, 127));
+
+    // Show CLEAN layers
+    if (s_clean_clip_layer) {
+      layer_set_hidden(s_clean_clip_layer, false);
+      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), false);  // SHOW Claude text!
       layer_set_hidden(text_layer_get_layer(s_clean_command_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
@@ -615,7 +627,8 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   }
 
   // Hide CLEAN layers in other modes
-  if (s_clean_claude_layer) {
+  if (s_clean_clip_layer) {
+    layer_set_hidden(s_clean_clip_layer, true);
     layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), true);
     layer_set_hidden(text_layer_get_layer(s_clean_command_layer), true);
     layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), true);
@@ -678,6 +691,83 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, s_cursor_visible ? GColorVividCerulean
                                                           : bg_color());
     graphics_fill_rect(ctx, GRect(bounds.size.w - 8, 2, 6, 6), 0, GCornerNone);
+  }
+}
+
+// PropertyAnimation stopped callback - loop the scroll
+static void claude_scroll_stopped(Animation *animation, bool finished, void *context) {
+  if (s_claude_scroll_anim) {
+    property_animation_destroy(s_claude_scroll_anim);
+    s_claude_scroll_anim = NULL;
+  }
+
+  // Restart if still in CLEAN mode and auto-scroll enabled
+  if (finished && s_display_mode == MODE_CLEAN && s_auto_scroll_enabled && s_clean_claude_layer) {
+    // Get current layer position
+    GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
+
+    // Calculate text height
+    GSize content_size = text_layer_get_content_size(s_clean_claude_layer);
+    int scroll_range = content_size.h - 111;  // 111px visible area (pixel perfect)
+
+    if (scroll_range > 20) {  // Only animate if there's enough to scroll
+      // Toggle direction: if at top, go down; if at bottom, go up
+      GRect start, finish;
+      if (frame.origin.y >= 0) {
+        // Currently at top, scroll down
+        start = GRect(4, 0, frame.size.w, frame.size.h);
+        finish = GRect(4, -scroll_range, frame.size.w, frame.size.h);
+      } else {
+        // Currently scrolled down, go back to top
+        start = frame;
+        finish = GRect(4, 0, frame.size.w, frame.size.h);
+      }
+
+      s_claude_scroll_anim = property_animation_create_layer_frame(
+        text_layer_get_layer(s_clean_claude_layer), &start, &finish);
+
+      Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
+      animation_set_duration(anim, scroll_range * 20);  // 20ms per pixel = plus rapide
+      animation_set_curve(anim, AnimationCurveLinear);
+      animation_set_delay(anim, 1000);  // 1s pause before next scroll
+      animation_set_handlers(anim, (AnimationHandlers){
+        .stopped = claude_scroll_stopped
+      }, NULL);
+      animation_schedule(anim);
+    }
+  }
+}
+
+// Start smooth scroll animation for Claude text
+static void start_claude_scroll() {
+  if (!s_clean_claude_layer || !s_auto_scroll_enabled) return;
+
+  // Stop existing animation
+  if (s_claude_scroll_anim) {
+    animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+    property_animation_destroy(s_claude_scroll_anim);
+    s_claude_scroll_anim = NULL;
+  }
+
+  // Calculate scroll range - 111px visible area
+  GSize content_size = text_layer_get_content_size(s_clean_claude_layer);
+  int scroll_range = content_size.h - 111;
+
+  if (scroll_range > 20) {
+    GRect start = GRect(4, 0, 136, 2000);
+    GRect finish = GRect(4, -scroll_range, 136, 2000);
+
+    s_claude_scroll_anim = property_animation_create_layer_frame(
+      text_layer_get_layer(s_clean_claude_layer), &start, &finish);
+
+    Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
+    animation_set_duration(anim, scroll_range * 20);  // 20ms/px = plus rapide
+    animation_set_curve(anim, AnimationCurveLinear);
+    animation_set_delay(anim, 2000);  // 2s initial delay to read start
+    animation_set_handlers(anim, (AnimationHandlers){
+      .stopped = claude_scroll_stopped
+    }, NULL);
+    animation_schedule(anim);
   }
 }
 
@@ -828,6 +918,8 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       // Update TextLayers with new content
       if (s_clean_claude_layer) {
         text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+        // Start smooth scroll animation
+        start_claude_scroll();
       }
       if (s_clean_command_layer) {
         text_layer_set_text(s_clean_command_layer, s_last_tool);
@@ -1020,18 +1112,20 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: UP = scroll up in Claude text
-    int len = strlen(s_claude_summary);
-    if (s_clean_scroll < 0) {
-      // First press: go to end - 150 chars
-      s_clean_scroll = len > 150 ? len - 150 : 0;
+    // CLEAN mode: UP = disable auto-scroll and scroll up manually
+    s_auto_scroll_enabled = false;
+    if (s_claude_scroll_anim) {
+      animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
     }
-    if (s_clean_scroll > 0) {
-      s_clean_scroll -= 50;  // Scroll up by ~50 chars
-      if (s_clean_scroll < 0) s_clean_scroll = 0;
-      layer_mark_dirty(s_canvas);
-    } else {
-      vibes_short_pulse();  // Already at top
+    // Manual scroll up (move layer down)
+    if (s_clean_claude_layer) {
+      GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
+      if (frame.origin.y < 0) {
+        frame.origin.y += 40;  // Scroll up by moving layer down
+        if (frame.origin.y > 0) frame.origin.y = 0;
+        layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
+        vibes_short_pulse();
+      }
     }
   } else {
     s_auto_scroll = false;
@@ -1084,18 +1178,28 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[2]);
     vibes_double_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: DOWN = scroll down or back to auto (end)
-    int len = strlen(s_claude_summary);
-    if (s_clean_scroll >= 0) {
-      int max_offset = len > 150 ? len - 150 : 0;
-      if (s_clean_scroll + 50 >= max_offset) {
-        s_clean_scroll = -1;  // Back to auto (show end)
+    // CLEAN mode: DOWN = scroll down or re-enable auto-scroll
+    if (s_clean_claude_layer) {
+      GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
+      GSize content = text_layer_get_content_size(s_clean_claude_layer);
+      int max_y = -(content.h - 111);  // 111px visible area
+
+      if (frame.origin.y > max_y + 10) {
+        // Can scroll down more
+        s_auto_scroll_enabled = false;
+        if (s_claude_scroll_anim) {
+          animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+        }
+        frame.origin.y -= 40;  // Scroll down by moving layer up
+        if (frame.origin.y < max_y) frame.origin.y = max_y;
+        layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
+        vibes_short_pulse();
       } else {
-        s_clean_scroll += 50;  // Scroll down by ~50 chars
+        // At bottom - re-enable auto-scroll
+        s_auto_scroll_enabled = true;
+        start_claude_scroll();
+        vibes_double_pulse();
       }
-      layer_mark_dirty(s_canvas);
-    } else {
-      vibes_short_pulse();  // Already at end
     }
   } else {
     s_auto_scroll = false;
@@ -1139,37 +1243,48 @@ static void click_config_provider(void *ctx) {
   window_long_click_subscribe(BUTTON_ID_SELECT, 500, select_long_handler, NULL);
 }
 
-// Create CLEAN mode TextLayers for PropertyAnimation
+// Create CLEAN mode TextLayers for PropertyAnimation - PIXEL PERFECT
 static void create_clean_layers() {
   if (s_clean_claude_layer) return;  // Already created
 
   Layer *root = window_get_root_layer(s_window);
-  GRect bounds = layer_get_bounds(root);
 
-  // Claude text layer - large for scrolling
-  s_clean_claude_layer = text_layer_create(GRect(4, 2, bounds.size.w - 8, 2000));
-  text_layer_set_background_color(s_clean_claude_layer, GColorBlack);
+  // LAYOUT CALCUL PIXEL PARFAIT (écran 144x168):
+  // Status:    18px @ y:150-168
+  // Prompt:    16px @ y:129-145 (3px up from 132)
+  // Separator: 2px  @ y:127-129
+  // Command:   16px @ y:111-127
+  // Claude:    111px @ y:0-111 (zone visible)
+
+  // CLIPPING LAYER - 111px pour contenir et clipper le texte Claude
+  s_clean_clip_layer = layer_create(GRect(0, 0, 144, 111));
+  layer_set_clips(s_clean_clip_layer, true);  // ACTIVER CLIPPING
+  layer_add_child(root, s_clean_clip_layer);
+
+  // Claude text layer - GRANDE (2000px) pour scroll, DANS le clip layer
+  s_clean_claude_layer = text_layer_create(GRect(4, 0, 136, 2000));
+  text_layer_set_background_color(s_clean_claude_layer, GColorClear);  // Transparent
   text_layer_set_text_color(s_clean_claude_layer, GColorPurple);
   text_layer_set_font(s_clean_claude_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_overflow_mode(s_clean_claude_layer, GTextOverflowModeWordWrap);
-  layer_add_child(root, text_layer_get_layer(s_clean_claude_layer));
+  layer_add_child(s_clean_clip_layer, text_layer_get_layer(s_clean_claude_layer));
 
-  // Command layer
-  s_clean_command_layer = text_layer_create(GRect(4, 100, bounds.size.w - 8, 16));
+  // Command layer - cyan, 600px large pour marquee scroll
+  s_clean_command_layer = text_layer_create(GRect(4, 111, 600, 16));
   text_layer_set_background_color(s_clean_command_layer, GColorBlack);
   text_layer_set_text_color(s_clean_command_layer, GColorCyan);
   text_layer_set_font(s_clean_command_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   layer_add_child(root, text_layer_get_layer(s_clean_command_layer));
 
-  // Prompt layer
-  s_clean_prompt_layer = text_layer_create(GRect(4, 132, bounds.size.w - 8, 16));
+  // Prompt layer - blanc/jaune, 600px pour marquee scroll
+  s_clean_prompt_layer = text_layer_create(GRect(4, 129, 600, 16));
   text_layer_set_background_color(s_clean_prompt_layer, GColorBlack);
   text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
   text_layer_set_font(s_clean_prompt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   layer_add_child(root, text_layer_get_layer(s_clean_prompt_layer));
 
   // Status layer
-  s_clean_status_layer = text_layer_create(GRect(0, bounds.size.h - 18, bounds.size.w, 18));
+  s_clean_status_layer = text_layer_create(GRect(0, 150, 144, 18));
   text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
   text_layer_set_text_color(s_clean_status_layer, GColorWhite);
   text_layer_set_font(s_clean_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -1185,9 +1300,20 @@ static void create_clean_layers() {
 
 // Destroy CLEAN mode layers
 static void destroy_clean_layers() {
+  // Stop animation first
+  if (s_claude_scroll_anim) {
+    animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+    property_animation_destroy(s_claude_scroll_anim);
+    s_claude_scroll_anim = NULL;
+  }
+
   if (s_clean_claude_layer) {
     text_layer_destroy(s_clean_claude_layer);
     s_clean_claude_layer = NULL;
+  }
+  if (s_clean_clip_layer) {
+    layer_destroy(s_clean_clip_layer);
+    s_clean_clip_layer = NULL;
   }
   if (s_clean_command_layer) {
     text_layer_destroy(s_clean_command_layer);
