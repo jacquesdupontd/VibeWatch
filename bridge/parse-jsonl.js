@@ -1,0 +1,212 @@
+// Parse Claude Code .jsonl transcript directly for clean, structured data
+const fs = require('fs');
+const path = require('path');
+
+// Find the active .jsonl file for a session
+function findActiveJsonl(sessionName) {
+    try {
+        const projectsDir = path.join(require('os').homedir(), '.claude', 'projects');
+
+        // Try to find folder matching session/project
+        const allFolders = fs.readdirSync(projectsDir);
+        let targetFolder = null;
+
+        // Look for folder that matches the session or current directory
+        for (const folder of allFolders) {
+            if (folder.includes('vibecoder') || folder.includes(sessionName)) {
+                targetFolder = folder;
+                break;
+            }
+        }
+
+        if (!targetFolder) return null;
+
+        const folderPath = path.join(projectsDir, targetFolder);
+        const files = fs.readdirSync(folderPath)
+            .filter(f => f.endsWith('.jsonl') && !f.includes('subagents'));
+
+        if (files.length === 0) return null;
+
+        // Return the most recent one
+        let newest = files[0];
+        let newestTime = 0;
+        for (const f of files) {
+            const fpath = path.join(folderPath, f);
+            const stat = fs.statSync(fpath);
+            if (stat.mtimeMs > newestTime) {
+                newestTime = stat.mtimeMs;
+                newest = f;
+            }
+        }
+
+        const jsonlPath = path.join(folderPath, newest);
+        console.log('[JSONL] Found transcript:', jsonlPath);
+        return jsonlPath;
+    } catch (e) {
+        console.error('[JSONL] Error finding file:', e.message);
+        return null;
+    }
+}
+
+// Parse the last N lines of the .jsonl file
+function parseRecentJsonl(jsonlPath, maxLines = 100) {
+    try {
+        const content = fs.readFileSync(jsonlPath, 'utf8');
+        const lines = content.trim().split('\n');
+
+        // Take last N lines
+        const recentLines = lines.slice(-maxLines);
+
+        // Parse each line as JSON
+        const events = [];
+        for (const line of recentLines) {
+            if (!line.trim()) continue;
+            try {
+                const json = JSON.parse(line);
+                events.push(json);
+            } catch (e) {
+                // Skip malformed lines
+            }
+        }
+
+        return events;
+    } catch (e) {
+        console.error('[JSONL] Error reading file:', e.message);
+        return [];
+    }
+}
+
+// Extract clean data from parsed events
+function extractCleanData(events) {
+    console.log(`[JSONL] Processing ${events.length} events`);
+
+    const result = {
+        claudeText: '',
+        lastTool: '',
+        userCmd: '',
+        status: 'Ready',
+        activeTask: '',
+        suggestion: ''
+    };
+
+    // Process events in reverse (most recent first)
+    const reversedEvents = [...events].reverse();
+
+    // Find ONLY the most recent complete assistant message (not mixed history)
+    for (const event of reversedEvents) {
+        if (event.type === 'assistant' && event.message?.content) {
+            const textBlocks = [];
+            for (const block of event.message.content) {
+                if (block.type === 'text' && block.text) {
+                    textBlocks.push(block.text);
+                }
+            }
+            // Take ONLY this message if it has text
+            if (textBlocks.length > 0) {
+                result.claudeText = textBlocks.join('\n\n');
+                console.log(`[JSONL] Extracted Claude text: ${result.claudeText.substring(0, 100)}... (${result.claudeText.length} chars)`);
+                break; // Stop after first complete message
+            }
+        }
+    }
+
+    // Find most recent tool_use
+    for (const event of reversedEvents) {
+        if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content) {
+                if (block.type === 'tool_use') {
+                    result.lastTool = formatToolUse(block.name, block.input);
+
+                    // Check if this tool is still running (no result yet)
+                    const hasResult = reversedEvents.some(e =>
+                        e.message?.content?.some(b =>
+                            b.type === 'tool_result' && b.tool_use_id === block.id
+                        )
+                    );
+
+                    if (!hasResult) {
+                        result.activeTask = getTaskFromTool(block.name, block.input);
+                        result.status = 'Working...';
+                    }
+
+                    break;
+                }
+            }
+            if (result.lastTool) break;
+        }
+    }
+
+    // Find most recent user message
+    for (const event of reversedEvents) {
+        if (event.type === 'user' && event.message?.content) {
+            for (const block of event.message.content) {
+                if (block.type === 'text' && block.text) {
+                    result.userCmd = block.text.trim();
+                    if (result.userCmd.length > 100) {
+                        result.userCmd = result.userCmd.substring(0, 100) + '...';
+                    }
+                    break;
+                }
+            }
+            if (result.userCmd) break;
+        }
+    }
+
+    console.log('[JSONL] Result:', JSON.stringify({
+        claudeTextLen: result.claudeText.length,
+        lastTool: result.lastTool,
+        userCmd: result.userCmd,
+        status: result.status,
+        activeTask: result.activeTask
+    }));
+
+    return result;
+}
+
+// Format tool_use into readable string
+function formatToolUse(name, input) {
+    switch (name) {
+        case 'Bash':
+            return `$ ${input?.command || ''}`;
+        case 'Read':
+            return `Read ${path.basename(input?.file_path || '')}`;
+        case 'Edit':
+            return `Edit ${path.basename(input?.file_path || '')}`;
+        case 'Write':
+            return `Write ${path.basename(input?.file_path || '')}`;
+        case 'Grep':
+            return `Grep "${input?.pattern || ''}"`;
+        case 'Task':
+            return `Task: ${input?.description || ''}`;
+        default:
+            return name;
+    }
+}
+
+// Get active task description from tool
+function getTaskFromTool(name, input) {
+    switch (name) {
+        case 'Bash':
+            const cmd = input?.command || '';
+            if (cmd.includes('build')) return 'Building...';
+            if (cmd.includes('install')) return 'Installing...';
+            if (cmd.includes('test')) return 'Testing...';
+            return 'Running command...';
+        case 'Read':
+            return 'Reading file...';
+        case 'Edit':
+            return 'Editing file...';
+        case 'Write':
+            return 'Writing file...';
+        case 'Task':
+            return input?.description || 'Running task...';
+        default:
+            return `${name}...`;
+    }
+}
+
+module.exports = {
+    findActiveJsonl,
+    parseRecentJsonl,
+    extractCleanData
+};

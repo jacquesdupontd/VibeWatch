@@ -3,6 +3,7 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { findActiveJsonl, parseRecentJsonl, extractCleanData } = require('./parse-jsonl');
 
 const PORT = 8080;
 const POLL_MS = 400;
@@ -971,98 +972,99 @@ wss.on('connection', (ws) => {
         pollInterval = setInterval(() => {
             if (!activeSession) return;
             try {
-                // Capture more history (-S -200 = start 200 lines back)
-                const raw = execSync(
-                    `tmux capture-pane -t "${activeSession}" -p -e -S -200 2>/dev/null`,
-                    { encoding: 'utf8', timeout: 2000 }
-                );
-
-                // Check if output is stream-json format
-                const isStreamJSON = isStreamJSONOutput(raw);
+                // NEW APPROACH: Read .jsonl file directly for structured data
+                const jsonlPath = findActiveJsonl(activeSession);
                 let cleanData;
                 let suggestion = null;
 
-                if (isStreamJSON) {
-                    // Parse stream-json directly - much cleaner!
-                    cleanData = parseStreamJSON(raw);
-                    // Add suggestion field if present
-                    if (cleanData.suggestion) {
-                        suggestion = cleanData.suggestion;
-                    }
+                if (jsonlPath) {
+                    console.log('[JSONL] Using direct .jsonl parsing (clean & structured)');
+                    const events = parseRecentJsonl(jsonlPath, 100);
+                    cleanData = extractCleanData(events);
+
+                    // Map to expected format
+                    cleanData = {
+                        userCmd: cleanData.userCmd || '',
+                        summary: cleanData.claudeText || '',
+                        status: cleanData.status || 'Ready',
+                        lastTool: cleanData.lastTool || '',
+                        activeTask: cleanData.activeTask || ''
+                    };
+                    suggestion = cleanData.suggestion;
                 } else {
-                    // Fallback to terminal parsing (normal Claude mode)
-                    const transcriptPath = findTranscriptFile(activeSession);
-                    if (transcriptPath) {
-                        cleanData = extractCleanDataFromTranscript(transcriptPath);
+                    // FALLBACK: Use tmux capture if .jsonl not found
+                    console.log('[JSONL] Fallback to tmux capture');
+                    const raw = execSync(
+                        `tmux capture-pane -t "${activeSession}" -p -e -S -200 2>/dev/null`,
+                        { encoding: 'utf8', timeout: 2000 }
+                    );
+
+                    // Check if output is stream-json format
+                    const isStreamJSON = isStreamJSONOutput(raw);
+
+                    if (isStreamJSON) {
+                        cleanData = parseStreamJSON(raw);
+                        if (cleanData.suggestion) {
+                            suggestion = cleanData.suggestion;
+                        }
                     } else {
-                        cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
-                    }
-
-                    // Override with real-time data from tmux
-                    const realtimeStatus = extractRealtimeStatus(raw);
-                    if (realtimeStatus) {
-                        cleanData.status = realtimeStatus;
-                    }
-
-                    const realtimeTool = extractRealtimeTool(raw);
-                    if (realtimeTool) {
-                        cleanData.lastTool = realtimeTool;
-                    }
-
-                    // Use JSONL for text if available
-                    const sessionCwd = getSessionCwd(activeSession);
-                    if (sessionCwd) {
-                        const jsonlText = extractTextFromJSONL(sessionCwd);
-                        if (jsonlText) {
-                            cleanData.summary = jsonlText;
+                        const transcriptPath = findTranscriptFile(activeSession);
+                        if (transcriptPath) {
+                            cleanData = extractCleanDataFromTranscript(transcriptPath);
+                        } else {
+                            cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
                         }
-                    }
-                    if (!cleanData.summary || cleanData.summary.length < 20) {
-                        const realtimeText = extractRealtimeText(raw);
-                        if (realtimeText) {
-                            cleanData.summary = realtimeText;
-                        }
-                    }
 
-                    // Detect suggestions from terminal
-                    const rawLines = raw.split('\n');
-                    for (let i = rawLines.length - 1; i >= 0; i--) {
-                        const rl = rawLines[i];
-                        if (!rl.includes('❯') && !rl.includes('>')) continue;
-                        if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
-                            let newSug = clean(rl).trim();
-                            if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
-                            if (newSug && newSug.length > 2) suggestion = newSug;
+                        const realtimeStatus = extractRealtimeStatus(raw);
+                        if (realtimeStatus) {
+                            cleanData.status = realtimeStatus;
                         }
-                        break;
+
+                        const realtimeTool = extractRealtimeTool(raw);
+                        if (realtimeTool) {
+                            cleanData.lastTool = realtimeTool;
+                        }
+
+                        const sessionCwd = getSessionCwd(activeSession);
+                        if (sessionCwd) {
+                            const jsonlText = extractTextFromJSONL(sessionCwd);
+                            if (jsonlText) {
+                                cleanData.summary = jsonlText;
+                            }
+                        }
+                        if (!cleanData.summary || cleanData.summary.length < 20) {
+                            const realtimeText = extractRealtimeText(raw);
+                            if (realtimeText) {
+                                cleanData.summary = realtimeText;
+                            }
+                        }
+
+                        const rawLines = raw.split('\n');
+                        for (let i = rawLines.length - 1; i >= 0; i--) {
+                            const rl = rawLines[i];
+                            if (!rl.includes('❯') && !rl.includes('>')) continue;
+                            if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
+                                let newSug = clean(rl).trim();
+                                if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
+                                if (newSug && newSug.length > 2) suggestion = newSug;
+                            }
+                            break;
+                        }
                     }
                 }
 
-                // Build message for watch
-                const promptType = detectPrompt(raw);
-                let screen = isStreamJSON ? '' : extractClaude(raw);
+                // Build message for watch - support BOTH verbose and clean modes
+                // For verbose mode: send summary as raw screen content
+                let screen = cleanData.summary || '';
+                const promptType = null;
 
                 const msg = { type: 'output', content: screen };
                 if (promptType) msg.prompt = promptType;
                 if (suggestion) msg.suggestion = suggestion;
 
-                // Ensure userCmd is set from cleanData
-                if (!cleanData.userCmd) {
-                    cleanData.userCmd = extractUserPrompt(raw) || '';
-                }
-
                 // Add suggestion to cleanData for CLEAN mode
                 if (suggestion) {
                     cleanData.suggestion = suggestion;
-                }
-
-                // Detect active task (Creating/Writing/etc.)
-                const activeTask = extractActiveTask(raw);
-                if (activeTask) {
-                    cleanData.activeTask = activeTask.name;
-                    cleanData.taskTime = activeTask.time;
-                    // Override status to show task is running
-                    cleanData.status = activeTask.name;
                 }
 
                 // Debug: log cleanData
