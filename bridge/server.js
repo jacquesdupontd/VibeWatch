@@ -638,11 +638,11 @@ function extractTextFromJSONL(sessionPath) {
                     // Extract text blocks from content array
                     for (const block of entry.message.content) {
                         if (block.type === 'text' && block.text) {
-                            // Clean up the text - remove markdown formatting
+                            // Clean up the text - remove markdown formatting but PRESERVE newlines
                             let text = block.text
                                 .replace(/\*\*/g, '')  // Remove bold
                                 .replace(/`/g, '')     // Remove code ticks
-                                .replace(/\n+/g, ' ')  // Newlines to spaces
+                                .replace(/\n{3,}/g, '\n\n')  // Max 2 consecutive newlines
                                 .trim();
                             if (text.length > 20) {
                                 textParts.unshift(text);
@@ -656,7 +656,7 @@ function extractTextFromJSONL(sessionPath) {
         }
 
         if (textParts.length > 0) {
-            let summary = textParts.join(' ');
+            let summary = textParts.join('\n');  // Join with newlines to preserve structure
             // Show END of text (most recent)
             if (summary.length > 800) {
                 summary = '...' + summary.substring(summary.length - 797);
@@ -716,7 +716,7 @@ function extractRealtimeText(raw) {
 
     if (paragraphs.length > 0) {
         const recent = paragraphs.slice(-3);
-        let summary = recent.join(' ');
+        let summary = recent.join('\n');  // Join with newlines to preserve structure
         if (summary.length > 800) {
             summary = '...' + summary.substring(summary.length - 797);
         }

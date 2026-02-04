@@ -11,6 +11,8 @@ static TextLayer *s_clean_command_layer = NULL;
 static TextLayer *s_clean_prompt_layer = NULL;
 static TextLayer *s_clean_status_layer = NULL;
 static PropertyAnimation *s_claude_scroll_anim = NULL;
+static PropertyAnimation *s_command_marquee_anim = NULL;  // Horizontal marquee for command
+static PropertyAnimation *s_prompt_marquee_anim = NULL;   // Horizontal marquee for prompt
 static bool s_auto_scroll_enabled = true;
 
 static char s_buffer[2048];
@@ -62,6 +64,10 @@ static GFont s_font;
 static int s_line_h = 0;
 static int s_space_w = 0;
 static int s_page_step = 168;
+
+// Forward declarations for animation functions
+static void start_command_marquee();
+static void start_prompt_marquee();
 
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
@@ -771,6 +777,98 @@ static void start_claude_scroll() {
   }
 }
 
+// Callback when command marquee animation stops - loop it
+static void command_marquee_stopped(Animation *animation, bool finished, void *context) {
+  if (s_command_marquee_anim) {
+    property_animation_destroy(s_command_marquee_anim);
+    s_command_marquee_anim = NULL;
+  }
+  // Restart marquee if text is still too long
+  if (s_clean_command_layer && s_last_tool[0]) {
+    start_command_marquee();
+  }
+}
+
+// Callback when prompt marquee animation stops - loop it
+static void prompt_marquee_stopped(Animation *animation, bool finished, void *context) {
+  if (s_prompt_marquee_anim) {
+    property_animation_destroy(s_prompt_marquee_anim);
+    s_prompt_marquee_anim = NULL;
+  }
+  // Restart marquee if text is still too long
+  if (s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
+    start_prompt_marquee();
+  }
+}
+
+// Start horizontal marquee for command layer (cyan)
+static void start_command_marquee() {
+  if (!s_clean_command_layer) return;
+
+  // Stop existing animation
+  if (s_command_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_command_marquee_anim));
+    property_animation_destroy(s_command_marquee_anim);
+    s_command_marquee_anim = NULL;
+  }
+
+  // Check if text is too long (visible width ~136px, ~23 chars)
+  GSize content_size = text_layer_get_content_size(s_clean_command_layer);
+  int overflow = content_size.w - 136;
+
+  if (overflow > 10) {
+    // Animate from right edge to left (scroll left to show overflow)
+    GRect start = GRect(4, 111, 600, 16);
+    GRect finish = GRect(4 - overflow - 20, 111, 600, 16);  // Extra 20px gap
+
+    s_command_marquee_anim = property_animation_create_layer_frame(
+      text_layer_get_layer(s_clean_command_layer), &start, &finish);
+
+    Animation *anim = property_animation_get_animation(s_command_marquee_anim);
+    animation_set_duration(anim, (overflow + 20) * 30);  // 30ms/px for readable speed
+    animation_set_curve(anim, AnimationCurveLinear);
+    animation_set_delay(anim, 2000);  // 2s pause before scrolling
+    animation_set_handlers(anim, (AnimationHandlers){
+      .stopped = command_marquee_stopped
+    }, NULL);
+    animation_schedule(anim);
+  }
+}
+
+// Start horizontal marquee for prompt layer (white/yellow)
+static void start_prompt_marquee() {
+  if (!s_clean_prompt_layer) return;
+
+  // Stop existing animation
+  if (s_prompt_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_prompt_marquee_anim));
+    property_animation_destroy(s_prompt_marquee_anim);
+    s_prompt_marquee_anim = NULL;
+  }
+
+  // Check if text is too long (visible width ~136px)
+  GSize content_size = text_layer_get_content_size(s_clean_prompt_layer);
+  int overflow = content_size.w - 136;
+
+  if (overflow > 10) {
+    // Animate from right edge to left
+    GRect start = GRect(4, 129, 600, 16);
+    GRect finish = GRect(4 - overflow - 20, 129, 600, 16);  // Extra 20px gap
+
+    s_prompt_marquee_anim = property_animation_create_layer_frame(
+      text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
+
+    Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
+    animation_set_duration(anim, (overflow + 20) * 30);  // 30ms/px
+    animation_set_curve(anim, AnimationCurveLinear);
+    animation_set_delay(anim, 2000);  // 2s pause
+    animation_set_handlers(anim, (AnimationHandlers){
+      .stopped = prompt_marquee_stopped
+    }, NULL);
+    animation_schedule(anim);
+  }
+}
+
 // Simple blink and marquee timer
 static void blink_tick(void *data) {
   s_cursor_visible = !s_cursor_visible;
@@ -923,6 +1021,8 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       }
       if (s_clean_command_layer) {
         text_layer_set_text(s_clean_command_layer, s_last_tool);
+        // Start marquee scroll if text is too long
+        start_command_marquee();
       }
       if (s_clean_prompt_layer) {
         // Show suggestion if available, else user command
@@ -933,6 +1033,8 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
           text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
         }
+        // Start marquee scroll if text is too long
+        start_prompt_marquee();
       }
       if (s_clean_status_layer) {
         // Set status with appropriate color
@@ -1264,7 +1366,7 @@ static void create_clean_layers() {
   // Claude text layer - GRANDE (2000px) pour scroll, DANS le clip layer
   s_clean_claude_layer = text_layer_create(GRect(4, 0, 136, 2000));
   text_layer_set_background_color(s_clean_claude_layer, GColorClear);  // Transparent
-  text_layer_set_text_color(s_clean_claude_layer, GColorPurple);
+  text_layer_set_text_color(s_clean_claude_layer, GColorVividViolet);  // Plus vif et lisible que Purple
   text_layer_set_font(s_clean_claude_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_overflow_mode(s_clean_claude_layer, GTextOverflowModeWordWrap);
   layer_add_child(s_clean_clip_layer, text_layer_get_layer(s_clean_claude_layer));
@@ -1300,11 +1402,21 @@ static void create_clean_layers() {
 
 // Destroy CLEAN mode layers
 static void destroy_clean_layers() {
-  // Stop animation first
+  // Stop animations first
   if (s_claude_scroll_anim) {
     animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
     property_animation_destroy(s_claude_scroll_anim);
     s_claude_scroll_anim = NULL;
+  }
+  if (s_command_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_command_marquee_anim));
+    property_animation_destroy(s_command_marquee_anim);
+    s_command_marquee_anim = NULL;
+  }
+  if (s_prompt_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_prompt_marquee_anim));
+    property_animation_destroy(s_prompt_marquee_anim);
+    s_prompt_marquee_anim = NULL;
   }
 
   if (s_clean_claude_layer) {
