@@ -32,9 +32,7 @@ static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[64] = "";  // Active task name (Creating README.md, etc.)
 static bool s_task_running = false;  // Is a task currently running?
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
-static int s_marquee_offset = 0;  // For horizontal scrolling
-static int s_vertical_scroll = 0;  // For vertical auto-scroll of Claude text
-static bool s_auto_vertical_scroll = true;  // Auto-scroll enabled
+static int s_marquee_offset = 0;  // For horizontal marquee (commands)
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -362,50 +360,16 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
 
   // Content zone for Claude text (everything above the tool line)
   int content_h = bounds.size.h - below_line - above_line - 4;
+  if (content_h < 20) content_h = 20;  // Safety minimum
   int content_w = bounds.size.w - 8;
+  if (content_w < 50) content_w = 50;  // Safety minimum
 
-  // ===== 1. Draw Claude text (green) at TOP with AUTO-SCROLL =====
+  // ===== 1. Draw Claude text (green) - simple, no fancy scroll =====
   if (s_claude_summary[0]) {
-    int len = strlen(s_claude_summary);
-    int start;
-
-    if (s_auto_vertical_scroll && len > 150) {
-      // Auto-scroll: loop through the text
-      start = s_vertical_scroll % len;
-      // If we're near the end, show from start to fill screen
-      if (start > len - 50) {
-        // Approaching end, prepare to loop
-      }
-    } else if (s_clean_scroll < 0) {
-      // Manual mode: show end
-      start = len > 150 ? len - 150 : 0;
-    } else {
-      start = s_clean_scroll;
-      if (start >= len) start = len > 150 ? len - 150 : 0;
-    }
-
-    // Word boundary
-    if (start > 0 && start < len) {
-      while (start > 0 && s_claude_summary[start] != ' ') start--;
-      if (s_claude_summary[start] == ' ') start++;
-    }
-
     graphics_context_set_text_color(ctx, GColorMintGreen);
-    graphics_draw_text(ctx, s_claude_summary + start, body,
-        GRect(4, 2, content_w, content_h - 4),
+    graphics_draw_text(ctx, s_claude_summary, body,
+        GRect(4, 2, content_w, content_h),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-
-    // Scroll indicators
-    if (start > 0) {
-      // Dot at top = can scroll up
-      graphics_context_set_fill_color(ctx, GColorCyan);
-      graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 4, 4, 4), 0, GCornerNone);
-    }
-    if (s_auto_vertical_scroll) {
-      // Pulsing dot = auto-scroll active
-      graphics_context_set_fill_color(ctx, s_cursor_visible ? GColorYellow : GColorDarkGray);
-      graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 12, 4, 4), 0, GCornerNone);
-    }
   }
 
   // ===== 2. Last tool (cyan) - ABOVE separator line, with MARQUEE =====
@@ -662,22 +626,14 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   }
 }
 
-// Cursor blink + marquee scroll + vertical scroll
-static void cursor_blink(void *data) {
+// Simple blink timer
+static void blink_tick(void *data) {
   s_cursor_visible = !s_cursor_visible;
   s_anim_counter++;
-  // Marquee horizontal: increment every 3 blinks (~240ms per char)
-  if (s_anim_counter % 3 == 0) {
-    s_marquee_offset++;
-  }
-  // Vertical scroll: increment every 8 blinks (~640ms per step) - slower
-  if (s_auto_vertical_scroll && s_anim_counter % 8 == 0) {
-    s_vertical_scroll += 10;  // ~10 chars per step
-  }
-  if (s_anim_counter >= 3200)
-    s_anim_counter = 0;
+  s_marquee_offset++;
+  if (s_anim_counter >= 1000) s_anim_counter = 0;
   layer_mark_dirty(s_canvas);
-  s_cursor_timer = app_timer_register(80, cursor_blink, NULL);
+  s_cursor_timer = app_timer_register(300, blink_tick, NULL);
 }
 
 // Streaming timer - characters per tick
@@ -746,8 +702,6 @@ static void inbox_received_callback(DictionaryIterator *iterator,
     if (strncmp(data, "CLEAN:", 6) == 0) {
       // Reset scroll when new content arrives
       s_clean_scroll = -1;
-      s_vertical_scroll = 0;
-      s_auto_vertical_scroll = true;
 
       // Clear buffers first
       s_user_cmd[0] = '\0';
@@ -984,17 +938,8 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // UP: disable auto-scroll, scroll up manually
-    s_auto_vertical_scroll = false;
-    int len = strlen(s_claude_summary);
-    int current = (s_clean_scroll < 0) ? (len > 150 ? len - 150 : 0) : s_clean_scroll;
-    if (current > 0) {
-      s_clean_scroll = current - 150;
-      if (s_clean_scroll < 0) s_clean_scroll = 0;
-      layer_mark_dirty(s_canvas);
-    } else {
-      vibes_short_pulse();
-    }
+    // CLEAN mode: UP does nothing for now (no scroll)
+    vibes_short_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
@@ -1019,18 +964,12 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[1]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: SELECT = accept suggestion OR toggle auto-scroll
+    // CLEAN mode: SELECT = accept suggestion
     if (s_suggestion[0]) {
-      send_accept();  // Accept suggestion (tab + enter)
+      send_accept();
       vibes_short_pulse();
     } else {
-      // Toggle auto-scroll
-      s_auto_vertical_scroll = !s_auto_vertical_scroll;
-      if (s_auto_vertical_scroll) {
-        s_vertical_scroll = 0;  // Reset to beginning
-      }
       vibes_short_pulse();
-      layer_mark_dirty(s_canvas);
     }
   } else if (s_auto_scroll) {
     send_accept();
@@ -1052,20 +991,8 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[2]);
     vibes_double_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // DOWN: disable auto-scroll, scroll down manually
-    s_auto_vertical_scroll = false;
-    if (s_clean_scroll >= 0) {
-      int len = strlen(s_claude_summary);
-      int max_offset = len > 150 ? len - 150 : 0;
-      if (s_clean_scroll + 150 >= max_offset) {
-        s_clean_scroll = -1;
-      } else {
-        s_clean_scroll += 150;
-      }
-      layer_mark_dirty(s_canvas);
-    } else {
-      vibes_short_pulse();
-    }
+    // CLEAN mode: DOWN does nothing for now (no scroll)
+    vibes_short_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;
@@ -1131,7 +1058,7 @@ static void window_load(Window *window) {
   s_chars_total = count_chars();
   s_chars_shown = 0;
   start_streaming();
-  s_cursor_timer = app_timer_register(80, cursor_blink, NULL);
+  s_cursor_timer = app_timer_register(300, blink_tick, NULL);
 }
 
 static void window_unload(Window *window) {

@@ -523,12 +523,21 @@ function extractActiveTask(raw) {
         const line = lines[i].trim();
         if (!line) continue;
 
+        // Skip system noise - hooks, internal messages
+        if (/hook/i.test(line)) continue;
+        if (/PostToolUse|PreToolUse/i.test(line)) continue;
+        if (/Running\s+\S+hook/i.test(line)) continue;
+
         // Pattern: "Creating README.md... (51s · ↓ 814 tokens)" or "· Creating file..."
-        const taskMatch = line.match(/[·✳✶✽*]?\s*(Creating|Writing|Reading|Editing|Building|Installing|Processing|Compiling|Running|Generating|Analyzing)\s+([^.…]+)(\.{3}|…)\s*(\((\d+[ms]?))?/i);
+        // Note: "Running" is intentionally NOT in this list - too many false positives
+        const taskMatch = line.match(/[·✳✶✽*]?\s*(Creating|Writing|Reading|Editing|Building|Installing|Processing|Compiling|Generating|Analyzing|Downloading|Uploading)\s+([^.…\(]+)(\.{3}|…)\s*(\((\d+[ms]?))?/i);
         if (taskMatch) {
             const action = taskMatch[1];
             let target = taskMatch[2].trim();
             const time = taskMatch[5] || '';
+
+            // Skip if target looks like system noise
+            if (/hook|tool|message/i.test(target)) continue;
 
             // Clean up target name
             if (target.length > 25) target = target.substring(0, 22) + '...';
@@ -728,6 +737,11 @@ function extractUserPrompt(raw) {
         const line = lines[i].trim();
         if (!line) continue;
 
+        // Skip system noise
+        if (/hook|PostToolUse|PreToolUse/i.test(line)) continue;
+        if (/Running\s+\S+hook/i.test(line)) continue;
+        if (/esc to interrupt|ctrl\+/i.test(line)) continue;
+
         // Look for prompt markers followed by actual user text
         // Skip empty prompts and suggestion lines
         const promptMatch = line.match(/[❯>]\s+(.+)/);
@@ -737,6 +751,7 @@ function extractUserPrompt(raw) {
             if (text.length < 3) continue;
             if (/^─+$/.test(text)) continue;
             if (/^\d+\s+file/.test(text)) continue;
+            if (/hook|Running\s/i.test(text)) continue;
             // This looks like a real user prompt
             if (text.length > 50) {
                 text = '...' + text.substring(text.length - 47);
