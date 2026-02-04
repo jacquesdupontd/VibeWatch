@@ -858,11 +858,11 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // Page UP - show earlier content (scroll toward beginning)
+    // Page UP - show earlier content (full page, ~150 chars visible)
     int len = strlen(s_claude_summary);
     int current = (s_clean_scroll < 0) ? (len > 150 ? len - 150 : 0) : s_clean_scroll;
     if (current > 0) {
-      s_clean_scroll = current - 120;
+      s_clean_scroll = current - 150;  // Full page scroll
       if (s_clean_scroll < 0) s_clean_scroll = 0;
       layer_mark_dirty(s_canvas);
     } else {
@@ -911,15 +911,14 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[2]);
     vibes_double_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // Page DOWN - show more recent content (toward end)
-    // If already at auto (-1) or near end, stay at auto
+    // Page DOWN - show more recent content (full page scroll)
     if (s_clean_scroll >= 0) {
       int len = strlen(s_claude_summary);
       int max_offset = len > 150 ? len - 150 : 0;
-      if (s_clean_scroll + 120 >= max_offset) {
+      if (s_clean_scroll + 150 >= max_offset) {
         s_clean_scroll = -1;  // Back to auto (show end)
       } else {
-        s_clean_scroll += 120;
+        s_clean_scroll += 150;  // Full page scroll
       }
       layer_mark_dirty(s_canvas);
     } else {

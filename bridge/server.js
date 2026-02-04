@@ -575,93 +575,60 @@ function extractRealtimeTool(raw) {
 }
 
 // Extract real-time assistant text from tmux (bullets and text)
-// Claude's text format: ⏺ starts a paragraph, continuation lines are indented (may have - bullets)
+// ONLY capture Claude's conversational text, NOT tool output
 function extractRealtimeText(raw) {
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
     const lines = cleaned.split('\n');
 
-    // Find Claude paragraphs: lines starting with ⏺ (not tool calls) + their continuations
+    // Find Claude paragraphs: ONLY ⏺ lines that are NOT tool calls
+    // Don't include continuation lines to avoid capturing tool output
     const paragraphs = [];
-    let currentParagraph = null;
-    let lastWasEmpty = false;
+    let inToolOutput = false;
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         const trimmed = line.trim();
 
-        if (!trimmed) {
-            lastWasEmpty = true;
-            continue;  // Don't end paragraph on empty line - wait for next content
-        }
+        if (!trimmed) continue;
 
         // Skip UI noise
-        if (/^[-=─━]{3,}/.test(trimmed)) { lastWasEmpty = false; continue; }
-        if (/Context left|esc to interrupt|ctrl\+[a-z]/.test(trimmed)) { lastWasEmpty = false; continue; }
-        if (/^\d+\s+files?\s+\+/.test(trimmed)) { lastWasEmpty = false; continue; }
-        if (/^[●✢✳✶·]/.test(trimmed)) { lastWasEmpty = false; continue; }
-        if (/^❯/.test(trimmed)) { lastWasEmpty = false; continue; }
-        if (/^⎿/.test(trimmed)) { lastWasEmpty = false; continue; }  // Tool output marker
+        if (/^[-=─━]{3,}/.test(trimmed)) continue;
+        if (/Context left|esc to interrupt|ctrl\+[a-z]/.test(trimmed)) continue;
+        if (/^\d+\s+files?\s+\+/.test(trimmed)) continue;
+        if (/^[●✢✳✶·]/.test(trimmed)) continue;
+        if (/^❯/.test(trimmed)) continue;
 
-        // New Claude paragraph: starts with ⏺ and is NOT a tool call
+        // Tool output marker - everything after this until next ⏺ is tool output
+        if (/^⎿/.test(trimmed)) {
+            inToolOutput = true;
+            continue;
+        }
+
+        // ⏺ line
         if (trimmed.startsWith('⏺')) {
-            // Save previous paragraph
-            if (currentParagraph) paragraphs.push(currentParagraph);
+            inToolOutput = false;  // New Claude action, reset tool output flag
 
-            // Skip if it's a tool call line
+            // Skip tool calls
             if (/^⏺\s*(Read|Write|Edit|Update|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP|NotebookEdit)\s*[\(\d]/i.test(trimmed)) {
-                currentParagraph = null;
-                lastWasEmpty = false;
+                inToolOutput = true;  // Tool call means output follows
                 continue;
             }
             if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob)\s+\d+\s+(file|line)/i.test(trimmed)) {
-                currentParagraph = null;
-                lastWasEmpty = false;
+                inToolOutput = true;
                 continue;
             }
 
-            // Start new paragraph
-            currentParagraph = trimmed.replace(/^⏺\s*/, '').trim();
-            lastWasEmpty = false;
+            // This is Claude's conversational text!
+            let text = trimmed.replace(/^⏺\s*/, '').trim();
+            if (text.length > 10) {
+                paragraphs.push(text);
+            }
             continue;
         }
 
-        // Continuation: indented line (spaces at start) - include dash bullets
-        // These can come after empty lines if they're part of Claude's formatted output
-        if (/^\s{2,}/.test(line) && !trimmed.startsWith('⏺') && !trimmed.startsWith('⎿')) {
-            if (/\(ctrl\+[a-z]\s+to\s+(expand|collapse)\)/i.test(trimmed)) {
-                lastWasEmpty = false;
-                continue;
-            }
-            // Skip diff/code lines
-            if (/^\d+\s*[-+]/.test(trimmed)) { lastWasEmpty = false; continue; }  // Diff line numbers
-            if (/^[-+]\s*(function|const|let|var|if|for|while|return|import|export|class)\s/.test(trimmed)) { lastWasEmpty = false; continue; }
-            if (/^\s*[\{\}\[\]];?\s*$/.test(trimmed)) { lastWasEmpty = false; continue; }  // Just braces
-            if (/^(Added|Removed|Modified)\s+\d+\s+line/.test(trimmed)) { lastWasEmpty = false; continue; }
-            // Skip lines that look like code (lots of special chars)
-            if ((trimmed.match(/[{}();=><]/g) || []).length > 3) { lastWasEmpty = false; continue; }
-
-            if (currentParagraph) {
-                // Continue the paragraph
-                currentParagraph += ' ' + trimmed;
-            }
-            // If no current paragraph but this looks like Claude text (starts with - bullet), start new
-            else if (/^-\s+[A-Z]/.test(trimmed)) {
-                currentParagraph = trimmed;
-            }
-            lastWasEmpty = false;
-            continue;
-        }
-
-        // Non-indented, non-⏺ line that's not noise: ends current paragraph
-        if (currentParagraph) {
-            paragraphs.push(currentParagraph);
-            currentParagraph = null;
-        }
-        lastWasEmpty = false;
+        // Skip everything else (tool output, indented content, etc.)
+        // We ONLY want ⏺ conversational paragraphs
     }
-
-    // Don't forget the last paragraph
-    if (currentParagraph) paragraphs.push(currentParagraph);
 
     // Take the last few paragraphs (most recent Claude text)
     if (paragraphs.length > 0) {
