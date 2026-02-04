@@ -608,13 +608,22 @@ function extractRealtimeText(raw) {
         if (trimmed.startsWith('⏺')) {
             inToolOutput = false;  // New Claude action, reset tool output flag
 
-            // Skip tool calls
+            // Skip tool calls and tool result summaries
             if (/^⏺\s*(Read|Write|Edit|Update|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP|NotebookEdit)\s*[\(\d]/i.test(trimmed)) {
-                inToolOutput = true;  // Tool call means output follows
+                inToolOutput = true;
                 continue;
             }
-            if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob)\s+\d+\s+(file|line)/i.test(trimmed)) {
+            if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob)\s+\d+\s+(file|line|pattern)/i.test(trimmed)) {
                 inToolOutput = true;
+                continue;
+            }
+            // Skip tool result summaries like "Searched for X pattern", "Found X files"
+            if (/^⏺\s*(Searched|Found|Created|Deleted|Modified|Installed|Built)\s+(for\s+)?\d+/i.test(trimmed)) {
+                inToolOutput = true;
+                continue;
+            }
+            // Skip lines with (ctrl+o to expand) - these are collapsed tool outputs
+            if (/\(ctrl\+[a-z]\s+to\s+(expand|collapse)\)/i.test(trimmed)) {
                 continue;
             }
 
