@@ -13,6 +13,7 @@ static TextLayer *s_clean_status_layer = NULL;
 static PropertyAnimation *s_claude_scroll_anim = NULL;
 static PropertyAnimation *s_command_marquee_anim = NULL;  // Horizontal marquee for command
 static PropertyAnimation *s_prompt_marquee_anim = NULL;   // Horizontal marquee for prompt
+static PropertyAnimation *s_status_marquee_anim = NULL;   // Horizontal marquee for status/task
 static bool s_auto_scroll_enabled = true;
 
 static char s_buffer[2048];
@@ -68,6 +69,7 @@ static int s_page_step = 168;
 // Forward declarations for animation functions
 static void start_command_marquee();
 static void start_prompt_marquee();
+static void start_status_marquee();
 
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
@@ -777,26 +779,26 @@ static void start_claude_scroll() {
   }
 }
 
-// Callback when command marquee animation stops - loop it
+// Callback when command marquee animation stops - loop infinitely
 static void command_marquee_stopped(Animation *animation, bool finished, void *context) {
   if (s_command_marquee_anim) {
     property_animation_destroy(s_command_marquee_anim);
     s_command_marquee_anim = NULL;
   }
-  // Restart marquee if text is still too long
-  if (s_clean_command_layer && s_last_tool[0]) {
+  // Instant restart for seamless infinite scroll (no delay)
+  if (finished && s_clean_command_layer && s_last_tool[0]) {
     start_command_marquee();
   }
 }
 
-// Callback when prompt marquee animation stops - loop it
+// Callback when prompt marquee animation stops - loop infinitely
 static void prompt_marquee_stopped(Animation *animation, bool finished, void *context) {
   if (s_prompt_marquee_anim) {
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
   }
-  // Restart marquee if text is still too long
-  if (s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
+  // Instant restart for seamless infinite scroll (no delay)
+  if (finished && s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
     start_prompt_marquee();
   }
 }
@@ -825,9 +827,9 @@ static void start_command_marquee() {
       text_layer_get_layer(s_clean_command_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_command_marquee_anim);
-    animation_set_duration(anim, (overflow + 20) * 30);  // 30ms/px for readable speed
+    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_delay(anim, 2000);  // 2s pause before scrolling
+    // No delay for seamless infinite scroll
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = command_marquee_stopped
     }, NULL);
@@ -859,11 +861,57 @@ static void start_prompt_marquee() {
       text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
-    animation_set_duration(anim, (overflow + 20) * 30);  // 30ms/px
+    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_delay(anim, 2000);  // 2s pause
+    // No delay for seamless infinite scroll
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = prompt_marquee_stopped
+    }, NULL);
+    animation_schedule(anim);
+  }
+}
+
+// Callback when status marquee animation stops - loop infinitely
+static void status_marquee_stopped(Animation *animation, bool finished, void *context) {
+  if (s_status_marquee_anim) {
+    property_animation_destroy(s_status_marquee_anim);
+    s_status_marquee_anim = NULL;
+  }
+  // Instant restart for seamless infinite scroll (no delay)
+  if (finished && s_clean_status_layer && s_active_task[0]) {
+    start_status_marquee();
+  }
+}
+
+// Start horizontal marquee for status layer (active task)
+static void start_status_marquee() {
+  if (!s_clean_status_layer) return;
+
+  // Stop existing animation
+  if (s_status_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
+    property_animation_destroy(s_status_marquee_anim);
+    s_status_marquee_anim = NULL;
+  }
+
+  // Check if task text is too long (visible width ~144px)
+  GSize content_size = text_layer_get_content_size(s_clean_status_layer);
+  int overflow = content_size.w - 144;
+
+  if (overflow > 10) {
+    // Animate from right edge to left (infinite scroll like pharmacies)
+    GRect start = GRect(0, 150, 600, 18);
+    GRect finish = GRect(-overflow - 20, 150, 600, 18);  // Extra 20px gap
+
+    s_status_marquee_anim = property_animation_create_layer_frame(
+      text_layer_get_layer(s_clean_status_layer), &start, &finish);
+
+    Animation *anim = property_animation_get_animation(s_status_marquee_anim);
+    animation_set_duration(anim, (overflow + 20) * 10);  // 10ms/px = 3x faster for infinite scroll
+    animation_set_curve(anim, AnimationCurveLinear);
+    // No delay for seamless infinite scroll
+    animation_set_handlers(anim, (AnimationHandlers){
+      .stopped = status_marquee_stopped
     }, NULL);
     animation_schedule(anim);
   }
@@ -1043,6 +1091,10 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           text_layer_set_background_color(s_clean_status_layer, GColorPurple);
         } else {
           text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
+        }
+        // Start marquee scroll if task text is too long
+        if (s_task_running && s_active_task[0]) {
+          start_status_marquee();
         }
       }
 
@@ -1376,6 +1428,7 @@ static void create_clean_layers() {
   text_layer_set_background_color(s_clean_command_layer, GColorBlack);
   text_layer_set_text_color(s_clean_command_layer, GColorCyan);
   text_layer_set_font(s_clean_command_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_overflow_mode(s_clean_command_layer, GTextOverflowModeFill);  // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_command_layer));
 
   // Prompt layer - blanc/jaune, 600px pour marquee scroll
@@ -1383,14 +1436,16 @@ static void create_clean_layers() {
   text_layer_set_background_color(s_clean_prompt_layer, GColorBlack);
   text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
   text_layer_set_font(s_clean_prompt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_overflow_mode(s_clean_prompt_layer, GTextOverflowModeFill);  // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_prompt_layer));
 
-  // Status layer
-  s_clean_status_layer = text_layer_create(GRect(0, 150, 144, 18));
+  // Status layer - 600px large pour marquee infini des tâches
+  s_clean_status_layer = text_layer_create(GRect(0, 150, 600, 18));
   text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
   text_layer_set_text_color(s_clean_status_layer, GColorWhite);
   text_layer_set_font(s_clean_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
+  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);  // Left for marquee
+  text_layer_set_overflow_mode(s_clean_status_layer, GTextOverflowModeFill);  // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_status_layer));
 
   // Hide all initially
@@ -1417,6 +1472,11 @@ static void destroy_clean_layers() {
     animation_unschedule(property_animation_get_animation(s_prompt_marquee_anim));
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
+  }
+  if (s_status_marquee_anim) {
+    animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
+    property_animation_destroy(s_status_marquee_anim);
+    s_status_marquee_anim = NULL;
   }
 
   if (s_clean_claude_layer) {

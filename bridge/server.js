@@ -643,6 +643,8 @@ function extractTextFromJSONL(sessionPath) {
                                 .replace(/\*\*/g, '')  // Remove bold
                                 .replace(/`/g, '')     // Remove code ticks
                                 .replace(/\n{3,}/g, '\n\n')  // Max 2 consecutive newlines
+                                // Remove ALL emojis and non-ASCII chars (except newlines)
+                                .replace(/[^\x20-\x7E\n]/g, '')
                                 .trim();
                             if (text.length > 20) {
                                 textParts.unshift(text);
@@ -717,6 +719,8 @@ function extractRealtimeText(raw) {
     if (paragraphs.length > 0) {
         const recent = paragraphs.slice(-3);
         let summary = recent.join('\n');  // Join with newlines to preserve structure
+        // Remove emojis and non-ASCII chars (except newlines)
+        summary = summary.replace(/[^\x20-\x7E\n]/g, '');
         if (summary.length > 800) {
             summary = '...' + summary.substring(summary.length - 797);
         }
