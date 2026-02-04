@@ -45,10 +45,10 @@ static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[128] = "";  // Increased for long task names
 static bool s_task_running = false;  // Is a task currently running?
 
-// Marquee duplicate buffers for seamless infinite scroll
-static char s_command_marquee_buf[256] = "";  // "text     text     text"
-static char s_prompt_marquee_buf[256] = "";
-static char s_status_marquee_buf[256] = "";
+// Marquee duplicate buffers for seamless infinite scroll (2 full copies + separator)
+static char s_command_marquee_buf[600] = "";
+static char s_prompt_marquee_buf[600] = "";
+static char s_status_marquee_buf[600] = "";
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
 static int s_marquee_offset = 0;  // For horizontal marquee (commands)
 
@@ -821,39 +821,41 @@ static void start_command_marquee() {
     s_command_marquee_anim = NULL;
   }
 
-  // Check if text is too long (visible width ~136px)
-  int text_len = strlen(s_last_tool);
-  if (text_len == 0) return;
+  if (s_last_tool[0] == '\0') return;
 
-  // Create duplicated text: "text     text     text" for seamless infinite scroll
-  snprintf(s_command_marquee_buf, sizeof(s_command_marquee_buf), "%s     %s     %s",
-           s_last_tool, s_last_tool, s_last_tool);
-  text_layer_set_text(s_clean_command_layer, s_command_marquee_buf);
+  // Measurement phase: set text to one instance plus separator to get exact width
+  static char measure_buf[300];
+  snprintf(measure_buf, sizeof(measure_buf), "%s  |  ", s_last_tool);
+  text_layer_set_text(s_clean_command_layer, measure_buf);
+  GSize single_size = text_layer_get_content_size(s_clean_command_layer);
+  int one_cycle_width = single_size.w;
 
-  // Get content size of ONE instance (original text + gap)
-  GSize content_size = text_layer_get_content_size(s_clean_command_layer);
-  int one_cycle_width = content_size.w / 3;  // Width of one "text     "
+  if (one_cycle_width > 120) { // Screen is 144px, gothic-14 is tight
+    // Preparation phase: fill buffer with two copies for seamlessness
+    snprintf(s_command_marquee_buf, sizeof(s_command_marquee_buf), "%s  |  %s  |  ",
+             s_last_tool, s_last_tool);
+    text_layer_set_text(s_clean_command_layer, s_command_marquee_buf);
 
-  if (one_cycle_width > 136) {
-    // Animate exactly one cycle distance for seamless loop
-    GRect start = GRect(4, 111, 600, 16);
-    GRect finish = GRect(4 - one_cycle_width, 111, 600, 16);
+    // Ensure layer is wide enough to hold both copies without wrapping
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 2000, 16));
+
+    GRect start = GRect(4, 111, 2000, 16);
+    GRect finish = GRect(4 - one_cycle_width, 111, 2000, 16);
 
     s_command_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_command_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_command_marquee_anim);
-    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
+    animation_set_duration(anim, one_cycle_width * 30);  // 30ms/px = smooth medical/pharmacy speed
     animation_set_curve(anim, AnimationCurveLinear);
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = command_marquee_stopped
     }, NULL);
     animation_schedule(anim);
   } else {
-    // Text is short - show original without duplication
+    // Text is short - show original
     text_layer_set_text(s_clean_command_layer, s_last_tool);
-    // Reset position to default
-    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 600, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 136, 16));
   }
 }
 
@@ -868,39 +870,39 @@ static void start_prompt_marquee() {
     s_prompt_marquee_anim = NULL;
   }
 
-  // Get current text (either user_cmd or suggestion)
   const char *text = s_suggestion[0] ? s_suggestion : s_user_cmd;
   if (!text || text[0] == '\0') return;
 
-  // Create duplicated text for seamless infinite scroll
-  snprintf(s_prompt_marquee_buf, sizeof(s_prompt_marquee_buf), "%s     %s     %s",
-           text, text, text);
-  text_layer_set_text(s_clean_prompt_layer, s_prompt_marquee_buf);
+  // Measurement
+  static char measure_buf[300];
+  snprintf(measure_buf, sizeof(measure_buf), "%s  |  ", text);
+  text_layer_set_text(s_clean_prompt_layer, measure_buf);
+  GSize single_size = text_layer_get_content_size(s_clean_prompt_layer);
+  int one_cycle_width = single_size.w;
 
-  // Get content size of ONE instance
-  GSize content_size = text_layer_get_content_size(s_clean_prompt_layer);
-  int one_cycle_width = content_size.w / 3;
+  if (one_cycle_width > 120) {
+    snprintf(s_prompt_marquee_buf, sizeof(s_prompt_marquee_buf), "%s  |  %s  |  ",
+             text, text);
+    text_layer_set_text(s_clean_prompt_layer, s_prompt_marquee_buf);
 
-  if (one_cycle_width > 136) {
-    // Animate exactly one cycle distance
-    GRect start = GRect(4, 129, 600, 16);
-    GRect finish = GRect(4 - one_cycle_width, 129, 600, 16);
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 2000, 16));
+
+    GRect start = GRect(4, 129, 2000, 16);
+    GRect finish = GRect(4 - one_cycle_width, 129, 2000, 16);
 
     s_prompt_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
-    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
+    animation_set_duration(anim, one_cycle_width * 30);
     animation_set_curve(anim, AnimationCurveLinear);
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = prompt_marquee_stopped
     }, NULL);
     animation_schedule(anim);
   } else {
-    // Text is short - show original
     text_layer_set_text(s_clean_prompt_layer, text);
-    // Reset position to default
-    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 600, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 136, 16));
   }
 }
 
@@ -927,37 +929,38 @@ static void start_status_marquee() {
     s_status_marquee_anim = NULL;
   }
 
-  // Create duplicated text for seamless infinite scroll
-  snprintf(s_status_marquee_buf, sizeof(s_status_marquee_buf), "%s     %s     %s",
-           s_active_task, s_active_task, s_active_task);
-  text_layer_set_text(s_clean_status_layer, s_status_marquee_buf);
+  // Measurement
+  static char measure_buf[300];
+  snprintf(measure_buf, sizeof(measure_buf), "%s       ", s_active_task);
+  text_layer_set_text(s_clean_status_layer, measure_buf);
+  GSize single_size = text_layer_get_content_size(s_clean_status_layer);
+  int one_cycle_width = single_size.w;
 
-  // Get content size of ONE instance
-  GSize content_size = text_layer_get_content_size(s_clean_status_layer);
-  int one_cycle_width = content_size.w / 3;
-
-  if (one_cycle_width > 144) {
-    // Change alignment to Left for marquee
+  if (one_cycle_width > 140) {
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);
+    snprintf(s_status_marquee_buf, sizeof(s_status_marquee_buf), "%s       %s       ",
+             s_active_task, s_active_task);
+    text_layer_set_text(s_clean_status_layer, s_status_marquee_buf);
 
-    // Animate exactly one cycle distance
-    GRect start = GRect(0, 150, 600, 18);
-    GRect finish = GRect(-one_cycle_width, 150, 600, 18);
+    layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 2000, 18));
+
+    GRect start = GRect(0, 150, 2000, 18);
+    GRect finish = GRect(-one_cycle_width, 150, 2000, 18);
 
     s_status_marquee_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_status_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_status_marquee_anim);
-    animation_set_duration(anim, one_cycle_width * 10);  // 10ms/px
+    animation_set_duration(anim, one_cycle_width * 30);
     animation_set_curve(anim, AnimationCurveLinear);
     animation_set_handlers(anim, (AnimationHandlers){
       .stopped = status_marquee_stopped
     }, NULL);
     animation_schedule(anim);
   } else {
-    // Text is short - show original centered
     text_layer_set_text(s_clean_status_layer, s_active_task);
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
+    layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 144, 18));
   }
 }
 
@@ -1124,19 +1127,25 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       }
       // Track last prompt to avoid restarting marquee on same text
       static char s_last_prompt_displayed[256] = "";
+      static bool s_last_was_suggestion = false;
 
       if (s_clean_prompt_layer) {
-        const char *current_text = s_suggestion[0] ? s_suggestion : s_user_cmd;
+        bool is_suggestion = (s_suggestion[0] != '\0');
+        const char *current_text = is_suggestion ? s_suggestion : s_user_cmd;
 
-        // Only restart marquee if text actually changed
-        if (strcmp(current_text, s_last_prompt_displayed) != 0) {
+        // Update if: text changed OR type changed (suggestion <-> user_cmd)
+        bool text_changed = strcmp(current_text, s_last_prompt_displayed) != 0;
+        bool type_changed = (is_suggestion != s_last_was_suggestion);
+
+        if (text_changed || type_changed) {
           strncpy(s_last_prompt_displayed, current_text, sizeof(s_last_prompt_displayed) - 1);
+          s_last_was_suggestion = is_suggestion;
 
-          if (s_suggestion[0]) {
-            text_layer_set_text(s_clean_prompt_layer, s_suggestion);
+          // Always update text and color
+          text_layer_set_text(s_clean_prompt_layer, current_text);
+          if (is_suggestion) {
             text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
-          } else if (s_user_cmd[0]) {
-            text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
+          } else {
             text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
           }
           start_prompt_marquee();
