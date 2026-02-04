@@ -1,0 +1,67 @@
+     - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+     [2m… +2 lines (ctrl+o to expand)[0m
+
+[38;2;255;255;255m⏺[39m Build réussi. Maintenant cap sync + gradle.
+
+[38;2;78;186;101m⏺[39m [1mBash[0m(cd "/Users/alloxrinfo/Documents/AiProjects/Cooking App-ClaudeCode-TestOpenCodeBigPickle" && npx cap sync android 2>&1 | tail -5)
+  ⎿         capacitor-pcm-audio@1.0.0
+            capacitor-plugin-safe-area@5.0.0
+            vosk-offline-speech-recognition@1.0.5
+     [2m… +2 lines (ctrl+o to expand)[0m
+
+[38;2;78;186;101m⏺[39m [1mBash[0m(cd "/Users/alloxrinfo/Documents/AiProjects/Cooking App-ClaudeCode-TestOpenCodeBigPickle/android" && ./gradlew assembleDebug 2>&1 | tail -10)
+  ⎿  > Task :vosk-offline-speech-recognition:mergeDebugJavaResource UP-TO-DATE
+     > Task :vosk-offline-speech-recognition:syncDebugLibJars UP-TO-DATE
+     > Task :vosk-offline-speech-recognition:bundleDebugAar
+     [2m… +7 lines (ctrl+o to expand)[0m
+
+[38;2;255;255;255m⏺[39m APK debug prête.
+
+[38;2;78;186;101m⏺[39m Read [1m1[0m file [38;2;153;153;153m(ctrl+o to expand)[39m
+
+[38;2;255;255;255m⏺[39m APK debug prête : [38;2;177;185;249mandroid/app/build/outputs/apk/debug/app-debug.apk[39m (194 Mo)
+
+  Tu peux l'envoyer sur ton téléphone via [38;2;177;185;249madb install[39m ou simplement copier le fichier.
+
+[38;2;78;186;101m⏺[39m [1mBash[0m(cd "/Users/alloxrinfo/Documents/AiProjects/Cooking App-ClaudeCode-TestOpenCodeBigPickle" && git add -A && git -c user.name="alloxrinfo" -c user.email="alloxrinf…)
+  ⎿  [experimental/ui-redesign f333b1c] fix: resolve strict build type errors across all refactored components
+      22 files changed, 50 insertions(+), 107 deletions(-)
+
+[38;2;255;255;255m⏺[39m Tout est commité (f333b1c) et l'APK debug est buildée. Le fichier est à :
+
+  android/app/build/outputs/apk/debug/app-debug.apk
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCooked for 10m 32s[39m
+
+[38;2;80;80;80m[48;2;55;55;55m❯ [38;2;255;255;255mclear                                                                                                                                                                                                                                                    [39m[49m
+[38;2;255;255;255m[48;2;55;55;55m  * Hello Claude                                                                                                                                                                                                                                           [39m[49m
+[38;2;255;255;255m[48;2;55;55;55m  ✔ build success                                                                                                                                                                                                                                          [39m[49m
+[38;2;255;255;255m[48;2;55;55;55m  ✘ tests failed                                                                                                                                                                                                                                           [39m[49m
+[38;2;255;255;255m[48;2;55;55;55m  📁 src/main.c                                                                                                                                                                                                                                            [39m[49m
+[38;2;255;255;255m[48;2;55;55;55m  /exit                                                                                                                                                                                                                                                    [39m[49m
+
+[38;2;255;255;255m⏺[39m Salut ! Qu'est-ce que je peux faire pour toi ?
+
+[38;2;80;80;80m[48;2;55;55;55m❯ [38;2;255;255;255m/exit [39m[49m
+[38;2;255;255;255m  ⎿  [39mSee ya!
+
+[38;2;80;80;80m[48;2;55;55;55m❯ [38;2;255;255;255mes tu sur d'avoir push les commit sur github ? J ene suis pas certain de voir l'update [39m[49m
+
+[38;2;255;255;255m⏺[39m Non, je n'ai fait aucun push. Les commits sont uniquement en local sur la branche [38;2;177;185;249mexperimental/ui-redesign[39m. Veux-tu que je push ?
+
+[38;2;78;186;101m⏺[39m [1mBash[0m(cd "/Users/alloxrinfo/Documents/AiProjects/Cooking App-ClaudeCode-TestOpenCodeBigPickle" && git log --oneline -8)
+  ⎿  f333b1c fix: resolve strict build type errors across all refactored components
+     1b00e66 refactor: split App.tsx into 6 screen components (4111→2187 lines)
+     a654351 refactor: split SettingsModal.tsx into 6 tab components (3958→720 lines)
+     [2m… +5 lines (ctrl+o to expand)[0m
+
+[38;2;255;255;255m⏺[39m 6 commits non poussés depuis [38;2;177;185;249m16105e8[39m. Tu veux que je fasse [38;2;177;185;249mgit push origin experimental/ui-redesign[39m ?
+
+[2m[38;2;136;136;136m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[0m❯ ❯ git add .\x1b[2m push
+  ❯ git add .\x1b[2m push[7m [0m
+[2m[38;2;136;136;136m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[0m
+
+
+

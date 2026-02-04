@@ -277,6 +277,202 @@ function extractClaude(raw) {
     return result.join('\n');
 }
 
+// Find the JSONL transcript file for a session
+function findTranscriptFile(sessionName) {
+    try {
+        const projectsDir = path.join(process.env.HOME, '.claude', 'projects');
+
+        // Get the actual working directory of the tmux session
+        let sessionCwd = null;
+        try {
+            sessionCwd = execSync(
+                `tmux display-message -t "${sessionName}" -p "#{pane_current_path}" 2>/dev/null`,
+                { encoding: 'utf8' }
+            ).trim();
+        } catch (e) {
+            console.log('Could not get tmux cwd for session:', sessionName);
+        }
+
+        // Convert session cwd to Claude's folder naming convention
+        // /Users/foo/bar becomes -Users-foo-bar
+        let expectedFolder = null;
+        if (sessionCwd) {
+            expectedFolder = sessionCwd.replace(/\//g, '-');
+            if (expectedFolder.startsWith('-')) expectedFolder = expectedFolder; // keep leading dash
+            console.log('Looking for Claude project folder:', expectedFolder);
+        }
+
+        // Find matching project folder
+        const allFolders = fs.readdirSync(projectsDir);
+        let folders = [];
+
+        if (expectedFolder) {
+            // Exact match first
+            folders = allFolders.filter(f => f === expectedFolder);
+            // Partial match if no exact
+            if (folders.length === 0) {
+                folders = allFolders.filter(f => f.includes(sessionName) || expectedFolder.includes(f));
+            }
+        }
+
+        // Fallback: try session name directly
+        if (folders.length === 0) {
+            folders = allFolders.filter(f => f.includes(sessionName));
+        }
+
+        for (const folder of folders) {
+            const folderPath = path.join(projectsDir, folder);
+            const stat = fs.statSync(folderPath);
+            if (!stat.isDirectory()) continue;
+            const files = fs.readdirSync(folderPath).filter(f => f.endsWith('.jsonl'));
+            if (files.length > 0) {
+                // Return the most recent one (by mtime)
+                let newest = files[0];
+                let newestTime = 0;
+                for (const f of files) {
+                    const fstat = fs.statSync(path.join(folderPath, f));
+                    if (fstat.mtimeMs > newestTime) {
+                        newestTime = fstat.mtimeMs;
+                        newest = f;
+                    }
+                }
+                console.log('Found transcript:', path.join(folderPath, newest));
+                return path.join(folderPath, newest);
+            }
+        }
+    } catch (e) {
+        console.log('Error finding transcript:', e.message);
+    }
+    return null;
+}
+
+// Extract structured data from JSONL transcript (CLEAN mode)
+function extractCleanDataFromTranscript(transcriptPath) {
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+        return { userCmd: '', summary: '', status: 'No transcript' };
+    }
+
+    try {
+        const content = fs.readFileSync(transcriptPath, 'utf8');
+        const lines = content.trim().split('\n').filter(l => l);
+
+        let userCmd = '';
+        let summary = '';
+        let status = 'Ready';
+
+        // Read last ~100 lines for recent activity (reverse order to find latest)
+        const recentLines = lines.slice(-100).reverse();
+
+        for (const line of recentLines) {
+            try {
+                const entry = JSON.parse(line);
+
+                // User message - get the actual text prompt (NOT tool_result)
+                if (entry.type === 'user' && entry.message && !userCmd) {
+                    const msgContent = entry.message.content;
+                    // String = direct user prompt
+                    if (typeof msgContent === 'string' && msgContent.length > 3) {
+                        userCmd = msgContent;
+                    } else if (Array.isArray(msgContent)) {
+                        // Array = look for text type, skip tool_result
+                        for (const item of msgContent) {
+                            if (item.type === 'tool_result') continue; // skip tool results
+                            if (item.type === 'text' && item.text && item.text.length > 3) {
+                                userCmd = item.text;
+                                break;
+                            }
+                            if (typeof item === 'string' && item.length > 3) {
+                                userCmd = item;
+                                break;
+                            }
+                        }
+                    }
+                    // Truncate and show END of long prompts
+                    if (userCmd && userCmd.length > 60) {
+                        userCmd = '...' + userCmd.substring(userCmd.length - 57);
+                    }
+                }
+
+                // Assistant message - look for text content (not thinking, not tool_use)
+                if (entry.type === 'assistant' && entry.message && entry.message.content && !summary) {
+                    const contents = entry.message.content;
+                    if (Array.isArray(contents)) {
+                        for (const c of contents) {
+                            if (c.type === 'text' && c.text && c.text.length > 10) {
+                                // Skip code blocks and tool descriptions
+                                if (!c.text.startsWith('```') && !c.text.includes('tool_use')) {
+                                    summary = c.text.substring(0, 400);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Stop if we have both
+                if (userCmd && summary) break;
+
+            } catch (e) { /* skip invalid JSON lines */ }
+        }
+
+        // Detect status - check last 50 entries for most recent assistant message with real stop_reason
+        for (let i = 0; i < Math.min(50, lines.length); i++) {
+            try {
+                const entry = JSON.parse(lines[lines.length - 1 - i]);
+                // Look for assistant message with stop_reason
+                if (entry.type === 'assistant' && entry.message && entry.message.stop_reason !== undefined) {
+                    if (entry.message.stop_reason === 'stop_sequence' || entry.message.stop_reason === 'end_turn') {
+                        status = 'Done';
+                        break;
+                    } else if (entry.message.stop_reason === 'tool_use') {
+                        status = 'Working...';
+                        break;
+                    }
+                    // Note: stop_reason=null means still streaming, keep looking for final message
+                }
+            } catch (e) {}
+        }
+
+        return { userCmd, summary, status };
+    } catch (e) {
+        console.log('Transcript error:', e.message);
+        return { userCmd: '', summary: 'Error: ' + e.message, status: 'Error' };
+    }
+}
+
+// Extract real-time status from tmux (fun words like Cogitating, Baking, etc.)
+function extractRealtimeStatus(raw) {
+    // Clean ANSI codes for easier parsing
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    // Check last 15 lines for status patterns
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 15); i--) {
+        const line = lines[i].trim();
+
+        // Pattern 1: "Word..." or "Word…" (thinking indicator)
+        // Matches: Crystallizing..., Cogitating..., Baking..., etc.
+        const thinkingMatch = line.match(/^([A-Z][a-z]+(?:ing|ting)?)(\.{3}|…)\s*$/);
+        if (thinkingMatch) {
+            return thinkingMatch[1] + '...';
+        }
+
+        // Pattern 2: "Word for Xs" or "Word for Xm Ys" (done indicator)
+        // Matches: "Thought for 2s", "Baked for 1m 30s", "Cogitated for 5s"
+        const doneMatch = line.match(/^([A-Z][a-z]+(?:ed|t)?)\s+for\s+\d+[ms]/);
+        if (doneMatch) {
+            return 'Done';
+        }
+
+        // Pattern 3: Single capitalized word that looks like a status
+        // Matches standalone: "Thinking", "Processing", etc.
+        if (/^[A-Z][a-z]+ing\s*$/.test(line) && line.length < 20) {
+            return line.trim() + '...';
+        }
+    }
+    return null; // No fun word found, use transcript status
+}
+
 // Session management
 function listSessions() {
     try {
@@ -298,6 +494,7 @@ function createSession(name) {
     const dir = path.join(PROJECT_BASE, name);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     try {
+        // Launch Claude normally (interactive mode) - user can see the terminal
         execSync(`tmux new-session -d -s "${name}" -c "${dir}" "cd '${dir}' && claude"`);
         return name;
     } catch { return null; }
@@ -353,6 +550,23 @@ wss.on('connection', (ws) => {
                 const msg = { type: 'output', content: screen };
                 if (promptType) msg.prompt = promptType;
                 if (suggestion) msg.suggestion = suggestion;
+
+                // Extract structured data for CLEAN mode
+                let cleanData;
+                const transcriptPath = findTranscriptFile(activeSession);
+                if (transcriptPath) {
+                    cleanData = extractCleanDataFromTranscript(transcriptPath);
+                } else {
+                    cleanData = { userCmd: '', summary: '', status: 'Ready' };
+                }
+
+                // Override status with real-time fun words from tmux (Cogitating, Baking, etc.)
+                const realtimeStatus = extractRealtimeStatus(raw);
+                if (realtimeStatus) {
+                    cleanData.status = realtimeStatus;
+                }
+
+                if (cleanData) msg.cleanData = cleanData;
 
                 const msgStr = JSON.stringify(msg);
                 if (msgStr !== lastSent && screen.length > 0) {

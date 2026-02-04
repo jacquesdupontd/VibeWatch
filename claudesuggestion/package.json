@@ -1,0 +1,14 @@
+{
+  "name": "pebble-claude-bridge",
+  "version": "1.0.0",
+  "description": "Bridge Claude Code events to Pebble watch — compact, watch-friendly stream parser",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node server.js",
+    "live": "node server.js --live",
+    "watch": "node server.js --watch-logs"
+  },
+  "keywords": ["pebble", "claude-code", "smartwatch", "bridge"],
+  "license": "MIT"
+}

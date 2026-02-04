@@ -21,6 +21,13 @@ static int s_session_count = 0;
 static int s_selected_idx = 0;
 static char s_active_session[32] = "";
 
+// Display mode: VERBOSE (streaming) vs CLEAN (structured)
+typedef enum { MODE_VERBOSE, MODE_CLEAN } DisplayMode;
+static DisplayMode s_display_mode = MODE_VERBOSE;
+static char s_user_cmd[128] = "";
+static char s_claude_summary[256] = "";
+static char s_status[32] = "Ready";
+
 // Streaming: character count
 static int s_chars_shown = 0;
 static int s_chars_total = 0;
@@ -325,6 +332,69 @@ done:
   return y + s_line_h + ((mode > 0) ? s_scroll_offset : 4);
 }
 
+static void draw_clean_mode(GContext *ctx, GRect bounds) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  GFont body = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+
+  // Layout: Claude response on top, user prompt at bottom
+  int prompt_h = 36;
+  int status_h = 18;
+  int bottom_y = bounds.size.h - prompt_h - status_h;
+
+  // Claude response (top, green) - main area
+  if (s_claude_summary[0]) {
+    graphics_context_set_text_color(ctx, GColorMintGreen);
+    graphics_draw_text(ctx, s_claude_summary, body,
+        GRect(4, 4, bounds.size.w - 8, bottom_y - 8), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  // Separator
+  graphics_context_set_stroke_color(ctx, GColorDarkGray);
+  graphics_draw_line(ctx, GPoint(10, bottom_y), GPoint(bounds.size.w - 10, bottom_y));
+
+  // User command (bottom, yellow) - show END of text if too long
+  if (s_user_cmd[0]) {
+    graphics_context_set_text_color(ctx, GColorYellow);
+    int len = strlen(s_user_cmd);
+    const char *display = s_user_cmd;
+    // If too long, show "...end of prompt"
+    if (len > 40) {
+      display = s_user_cmd + len - 37;  // Show last ~37 chars
+    }
+    graphics_draw_text(ctx, display, small,
+        GRect(4, bottom_y + 2, bounds.size.w - 8, prompt_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  // Status bar at very bottom
+  int status_y = bounds.size.h - status_h;
+  GColor status_bg = GColorDarkGray;
+  GColor status_fg = GColorWhite;
+  if (strstr(s_status, "Baking") || strstr(s_status, "Running") || strstr(s_status, "Thinking")) {
+    status_bg = GColorOrange;
+    status_fg = GColorBlack;
+  } else if (strstr(s_status, "Done") || strstr(s_status, "Brewed")) {
+    status_bg = GColorIslamicGreen;
+    status_fg = GColorWhite;
+  } else if (strstr(s_status, "Error") || strstr(s_status, "Failed")) {
+    status_bg = GColorRed;
+    status_fg = GColorWhite;
+  }
+
+  graphics_context_set_fill_color(ctx, status_bg);
+  graphics_fill_rect(ctx, GRect(0, status_y, bounds.size.w, status_h), 0, GCornerNone);
+  graphics_context_set_text_color(ctx, status_fg);
+  graphics_draw_text(ctx, s_status, small,
+      GRect(4, status_y, bounds.size.w - 8, status_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+  // Mode indicator
+  graphics_context_set_text_color(ctx, GColorDarkGray);
+  graphics_draw_text(ctx, "CLEAN", fonts_get_system_font(FONT_KEY_GOTHIC_09),
+      GRect(bounds.size.w - 30, 0, 28, 10), GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+}
+
 static void draw_menu(GContext *ctx, GRect bounds) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -385,7 +455,13 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     return;
   }
 
-  // Session mode
+  // CLEAN mode - structured display
+  if (s_display_mode == MODE_CLEAN) {
+    draw_clean_mode(ctx, bounds);
+    return;
+  }
+
+  // VERBOSE mode - streaming display (original)
   graphics_context_set_fill_color(ctx, bg_color());
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   if (s_buffer[0] == '\0')
@@ -512,6 +588,32 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       s_buffer[0] = '\0';
       s_chars_shown = 0;
       s_chars_total = 0;
+      strncpy(s_status, "Ready", sizeof(s_status));
+      layer_mark_dirty(s_canvas);
+      return;
+    }
+
+    // CLEAN:cmd|summary|status - structured data for clean mode
+    if (strncmp(data, "CLEAN:", 6) == 0) {
+      const char *p = data + 6;
+      const char *sep1 = strchr(p, '|');
+      if (sep1) {
+        int len = (int)(sep1 - p);
+        if (len > 127) len = 127;
+        strncpy(s_user_cmd, p, len);
+        s_user_cmd[len] = '\0';
+        p = sep1 + 1;
+        const char *sep2 = strchr(p, '|');
+        if (sep2) {
+          len = (int)(sep2 - p);
+          if (len > 255) len = 255;
+          strncpy(s_claude_summary, p, len);
+          s_claude_summary[len] = '\0';
+          p = sep2 + 1;
+          strncpy(s_status, p, sizeof(s_status) - 1);
+          s_status[sizeof(s_status) - 1] = '\0';
+        }
+      }
       layer_mark_dirty(s_canvas);
       return;
     }
@@ -737,6 +839,11 @@ static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_state == STATE_MENU) {
     send_msg("list");
     vibes_short_pulse();
+  } else if (s_state == STATE_SESSION) {
+    // Toggle display mode (VERBOSE <-> CLEAN)
+    s_display_mode = (s_display_mode == MODE_VERBOSE) ? MODE_CLEAN : MODE_VERBOSE;
+    vibes_double_pulse();
+    layer_mark_dirty(s_canvas);
   }
 }
 static void select_long_handler(ClickRecognizerRef recognizer, void *ctx) {
@@ -747,16 +854,6 @@ static void select_long_handler(ClickRecognizerRef recognizer, void *ctx) {
     layer_mark_dirty(s_canvas);
     vibes_short_pulse();
   }
-}
-static void back_long_handler(ClickRecognizerRef recognizer, void *ctx) {
-  s_dark_mode = !s_dark_mode;
-  window_set_background_color(s_window, bg_color());
-  text_layer_set_background_color(
-      s_prompt_layer, s_dark_mode ? GColorDarkGray : GColorLightGray);
-  text_layer_set_text_color(s_prompt_layer,
-                            s_dark_mode ? GColorWhite : GColorBlack);
-  vibes_short_pulse();
-  layer_mark_dirty(s_canvas);
 }
 
 static void click_config_provider(void *ctx) {

@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pebble × Claude Code</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg-deep: #080b14;
+    --bg-mid: #0d1117;
+    --watch-bg: #0a0f0a;
+    --watch-frame: #2a2d35;
+    --watch-bezel: #1a1d25;
+    --green: #4ade80;
+    --green-dim: #22c55e33;
+    --green-glow: #4ade8044;
+    --red: #f87171;
+    --red-dim: #f8717133;
+    --yellow: #fbbf24;
+    --yellow-dim: #fbbf2433;
+    --cyan: #67e8f9;
+    --cyan-dim: #67e8f933;
+    --white: #e2e8f0;
+    --white-dim: #e2e8f066;
+    --gray: #475569;
+    --text-muted: #64748b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Starfield background ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 50% 10%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 70% 80%, rgba(255,255,255,0.2), transparent),
+      radial-gradient(1px 1px at 90% 40%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 15% 85%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 60% 35%, rgba(255,255,255,0.25), transparent),
+      radial-gradient(1px 1px at 85% 15%, rgba(255,255,255,0.35), transparent),
+      radial-gradient(1px 1px at 40% 90%, rgba(255,255,255,0.2), transparent),
+      radial-gradient(1.5px 1.5px at 25% 45%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(ellipse at 20% 50%, #1a0a3a22, transparent 60%),
+      radial-gradient(ellipse at 80% 30%, #0a1a2a33, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .layout {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 48px;
+    padding: 40px 24px;
+    min-height: 100vh;
+    flex-wrap: wrap;
+  }
+
+  /* ── Watch Column ── */
+  .watch-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+  }
+
+  /* ── Pebble Watch Frame ── */
+  .watch-outer {
+    position: relative;
+    width: 220px;
+    padding: 10px;
+  }
+
+  /* Band top */
+  .band-top, .band-bottom {
+    width: 80px;
+    margin: 0 auto;
+    background: linear-gradient(90deg, #1e2028 0%, #2a2d38 30%, #2a2d38 70%, #1e2028 100%);
+    border-radius: 4px;
+  }
+  .band-top {
+    height: 60px;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: -4px;
+    position: relative;
+  }
+  .band-top::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 10%;
+    right: 10%;
+    height: 1px;
+    background: rgba(255,255,255,0.05);
+  }
+  .band-bottom {
+    height: 60px;
+    border-radius: 0 0 4px 4px;
+    margin-top: -4px;
+  }
+
+  .watch-body {
+    width: 200px;
+    background: linear-gradient(145deg, #33363f 0%, #25282f 40%, #1d2027 100%);
+    border-radius: 18px;
+    padding: 16px 14px;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.06),
+      0 8px 32px rgba(0,0,0,0.6),
+      inset 0 1px 0 rgba(255,255,255,0.08);
+    position: relative;
+  }
+
+  /* Side buttons */
+  .watch-body::before {
+    content: '';
+    position: absolute;
+    right: -6px;
+    top: 30%;
+    width: 6px;
+    height: 24px;
+    background: linear-gradient(90deg, #33363f, #3a3d46);
+    border-radius: 0 3px 3px 0;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .watch-body::after {
+    content: '';
+    position: absolute;
+    right: -6px;
+    top: 55%;
+    width: 6px;
+    height: 36px;
+    background: linear-gradient(90deg, #33363f, #3a3d46);
+    border-radius: 0 3px 3px 0;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+
+  .watch-screen {
+    background: var(--watch-bg);
+    border-radius: 8px;
+    width: 172px;
+    height: 220px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow:
+      inset 0 0 20px rgba(0,0,0,0.8),
+      inset 0 0 4px rgba(74,222,128,0.05);
+    position: relative;
+  }
+
+  /* Scanline effect */
+  .watch-screen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      transparent 0px,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 5;
+  }
+
+  /* ── Watch Header ── */
+  .watch-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid rgba(74,222,128,0.15);
+    flex-shrink: 0;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  .status-dot.disconnected {
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red-dim);
+    animation: none;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .watch-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--green);
+    letter-spacing: 0.5px;
+  }
+
+  .watch-mode {
+    margin-left: auto;
+    font-size: 7px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* ── Watch Event List ── */
+  .watch-events {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    scrollbar-width: none;
+  }
+  .watch-events::-webkit-scrollbar { display: none; }
+
+  .watch-event {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    font-size: 9px;
+    line-height: 1.3;
+    padding: 2px 0;
+    animation: event-in 0.3s ease-out;
+    min-height: 14px;
+  }
+
+  @keyframes event-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .watch-event .icon {
+    flex-shrink: 0;
+    width: 10px;
+    text-align: center;
+    font-weight: 700;
+  }
+
+  .watch-event .label {
+    word-break: break-all;
+  }
+
+  .watch-event .detail {
+    color: var(--text-muted);
+    font-size: 8px;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .watch-event.color-green .icon { color: var(--green); }
+  .watch-event.color-green .label { color: var(--green); }
+  .watch-event.color-red .icon { color: var(--red); }
+  .watch-event.color-red .label { color: var(--red); }
+  .watch-event.color-yellow .icon { color: var(--yellow); }
+  .watch-event.color-yellow .label { color: var(--white); }
+  .watch-event.color-cyan .icon { color: var(--cyan); }
+  .watch-event.color-cyan .label { color: var(--cyan); opacity: 0.85; }
+  .watch-event.color-white .icon { color: var(--white); }
+  .watch-event.color-white .label { color: var(--white); font-weight: 500; }
+
+  /* User events get a subtle highlight */
+  .watch-event.type-user {
+    background: rgba(255,255,255,0.03);
+    border-radius: 3px;
+    padding: 3px 4px;
+    margin: 1px -4px;
+  }
+
+  /* Result events */
+  .watch-event.type-result {
+    border-top: 1px solid rgba(74,222,128,0.1);
+    padding-top: 4px;
+    margin-top: 2px;
+  }
+
+  /* ── Watch Action Buttons ── */
+  .watch-actions {
+    display: flex;
+    gap: 8px;
+    padding: 6px 10px 8px;
+    border-top: 1px solid rgba(74,222,128,0.1);
+    flex-shrink: 0;
+  }
+
+  .watch-btn {
+    flex: 1;
+    height: 26px;
+    border: 1px solid;
+    border-radius: 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    background: transparent;
+  }
+
+  .watch-btn.accept {
+    border-color: var(--green);
+    color: var(--green);
+  }
+  .watch-btn.accept:hover {
+    background: var(--green-dim);
+    box-shadow: 0 0 12px var(--green-glow);
+  }
+
+  .watch-btn.reject {
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .watch-btn.reject:hover {
+    background: var(--red-dim);
+    box-shadow: 0 0 12px rgba(248,113,113,0.3);
+  }
+
+  /* ── Prompt Input (below watch) ── */
+  .prompt-area {
+    width: 220px;
+    display: flex;
+    gap: 6px;
+  }
+
+  .prompt-input {
+    flex: 1;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .prompt-input:focus {
+    border-color: var(--green);
+    box-shadow: 0 0 8px var(--green-glow);
+  }
+  .prompt-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .prompt-send {
+    width: 36px;
+    height: 36px;
+    background: var(--green);
+    border: none;
+    border-radius: 8px;
+    color: var(--bg-deep);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    font-weight: 700;
+  }
+  .prompt-send:hover {
+    background: #5eead4;
+    box-shadow: 0 0 16px var(--green-glow);
+    transform: scale(1.05);
+  }
+
+  /* ── Terminal Panel ── */
+  .terminal-column {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 480px;
+    min-width: 340px;
+  }
+
+  .terminal-card {
+    background: rgba(13,17,23,0.85);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    overflow: hidden;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+
+  .terminal-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .terminal-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .terminal-dot.r { background: #ff5f57; }
+  .terminal-dot.y { background: #febc2e; }
+  .terminal-dot.g { background: #28c840; }
+
+  .terminal-title {
+    margin-left: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+
+  .terminal-body {
+    padding: 12px 14px;
+    max-height: 400px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .terminal-body::-webkit-scrollbar {
+    width: 4px;
+  }
+  .terminal-body::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .terminal-body::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+  }
+
+  .term-line {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    animation: term-in 0.25s ease-out;
+  }
+  @keyframes term-in {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .term-line .t-icon {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-weight: 600;
+  }
+  .term-line .t-text {
+    word-break: break-word;
+  }
+  .term-line .t-meta {
+    margin-left: auto;
+    color: var(--text-muted);
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .term-line.c-green .t-icon, .term-line.c-green .t-text { color: var(--green); }
+  .term-line.c-red .t-icon, .term-line.c-red .t-text { color: var(--red); }
+  .term-line.c-yellow .t-icon { color: var(--yellow); }
+  .term-line.c-yellow .t-text { color: var(--white); }
+  .term-line.c-cyan .t-icon, .term-line.c-cyan .t-text { color: var(--cyan); }
+  .term-line.c-white .t-icon { color: var(--white); }
+  .term-line.c-white .t-text { color: var(--white); font-weight: 500; }
+
+  /* ── Info Card ── */
+  .info-card {
+    background: rgba(13,17,23,0.6);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 16px;
+    backdrop-filter: blur(8px);
+  }
+
+  .info-card h3 {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--green);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
+  }
+
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 11px;
+  }
+  .info-row .info-label {
+    color: var(--text-muted);
+  }
+  .info-row .info-value {
+    color: var(--white);
+    font-weight: 500;
+  }
+  .info-row .info-value.live {
+    color: var(--green);
+  }
+
+  /* ── Deploy Toast ── */
+  .toast {
+    position: fixed;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: rgba(13,17,23,0.95);
+    border: 1px solid rgba(74,222,128,0.3);
+    border-radius: 12px;
+    padding: 12px 20px;
+    font-size: 13px;
+    color: var(--white);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 24px var(--green-glow);
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+  .toast.visible {
+    transform: translateX(-50%) translateY(0);
+  }
+  .toast .toast-icon {
+    font-size: 18px;
+  }
+
+  /* ── Connection Badge ── */
+  .conn-badge {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(13,17,23,0.8);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 20px;
+    font-size: 10px;
+    color: var(--text-muted);
+    backdrop-filter: blur(8px);
+    z-index: 50;
+  }
+  .conn-badge .conn-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .conn-badge.connected .conn-dot {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 700px) {
+    .layout {
+      flex-direction: column;
+      align-items: center;
+      gap: 32px;
+    }
+    .terminal-column {
+      min-width: 0;
+      width: 100%;
+      max-width: 400px;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="conn-badge" id="connBadge">
+  <div class="conn-dot"></div>
+  <span id="connText">Connecting...</span>
+</div>
+
+<div class="layout">
+
+  <!-- ── Watch Column ── -->
+  <div class="watch-column">
+    <div class="watch-outer">
+      <div class="band-top"></div>
+      <div class="watch-body">
+        <div class="watch-screen">
+          <div class="watch-header">
+            <div class="status-dot" id="statusDot"></div>
+            <div class="watch-title">Claude Code</div>
+            <div class="watch-mode" id="watchMode">mock</div>
+          </div>
+          <div class="watch-events" id="watchEvents">
+            <!-- Events populate here -->
+          </div>
+          <div class="watch-actions">
+            <button class="watch-btn accept" onclick="handleAccept()">✓</button>
+            <button class="watch-btn reject" onclick="handleReject()">✗</button>
+          </div>
+        </div>
+      </div>
+      <div class="band-bottom"></div>
+    </div>
+
+    <div class="prompt-area">
+      <input
+        type="text"
+        class="prompt-input"
+        id="promptInput"
+        placeholder="send prompt..."
+        onkeydown="if(event.key==='Enter')sendPrompt()"
+      >
+      <button class="prompt-send" onclick="sendPrompt()">›</button>
+    </div>
+  </div>
+
+  <!-- ── Terminal Column ── -->
+  <div class="terminal-column">
+
+    <div class="terminal-card">
+      <div class="terminal-titlebar">
+        <div class="terminal-dot r"></div>
+        <div class="terminal-dot y"></div>
+        <div class="terminal-dot g"></div>
+        <div class="terminal-title">claude — event stream</div>
+      </div>
+      <div class="terminal-body" id="terminalBody">
+        <!-- Terminal lines populate here -->
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>Connection</h3>
+      <div class="info-row">
+        <span class="info-label">Status</span>
+        <span class="info-value" id="infoStatus">Connecting</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Mode</span>
+        <span class="info-value" id="infoMode">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Events</span>
+        <span class="info-value" id="infoEvents">0</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Session</span>
+        <span class="info-value" id="infoSession">—</span>
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>Setup</h3>
+      <div style="font-size: 11px; color: var(--text-muted); line-height: 1.6;">
+        <div style="margin-bottom: 6px;"><span style="color:var(--yellow)">Mock:</span> <code style="color:var(--white)">node server.js</code></div>
+        <div style="margin-bottom: 6px;"><span style="color:var(--green)">Live:</span> <code style="color:var(--white)">node server.js --live</code></div>
+        <div><span style="color:var(--cyan)">Watch:</span> <code style="color:var(--white)">node server.js --watch-logs</code></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast">
+  <span class="toast-icon">🚀</span>
+  <span id="toastText">Deployed to prod!</span>
+</div>
+
+<script>
+// ── State ──
+let ws = null;
+let eventCount = 0;
+let reconnectTimer = null;
+const MAX_WATCH_EVENTS = 30;
+const MAX_TERMINAL_LINES = 100;
+
+// ── DOM refs ──
+const watchEvents = document.getElementById('watchEvents');
+const terminalBody = document.getElementById('terminalBody');
+const statusDot = document.getElementById('statusDot');
+const connBadge = document.getElementById('connBadge');
+const connText = document.getElementById('connText');
+const watchMode = document.getElementById('watchMode');
+
+// ── WebSocket ──
+function connect() {
+  const wsUrl = `ws://${location.host}/ws`;
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    connBadge.classList.add('connected');
+    connText.textContent = 'Connected';
+    statusDot.classList.remove('disconnected');
+    document.getElementById('infoStatus').textContent = 'Connected';
+    document.getElementById('infoStatus').classList.add('live');
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'clear') {
+        watchEvents.innerHTML = '';
+        terminalBody.innerHTML = '';
+        eventCount = 0;
+        updateInfo();
+        return;
+      }
+      handleEvent(data);
+    } catch (err) {
+      console.error('Parse error:', err);
+    }
+  };
+
+  ws.onclose = () => {
+    connBadge.classList.remove('connected');
+    connText.textContent = 'Reconnecting...';
+    statusDot.classList.add('disconnected');
+    document.getElementById('infoStatus').textContent = 'Disconnected';
+    document.getElementById('infoStatus').classList.remove('live');
+    reconnectTimer = setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+// ── Handle parsed events ──
+function handleEvent(evt) {
+  eventCount++;
+  addWatchEvent(evt);
+  addTerminalLine(evt);
+  updateInfo(evt);
+
+  // Special: show toast for deploy/result events
+  if (evt.type === 'result' && evt.color === 'green') {
+    showToast('🚀 Done!');
+  }
+  if (evt.type === 'tool_result' && evt.label && evt.label.includes('main')) {
+    showToast('🚀 Deployed to prod!');
+  }
+}
+
+// ── Watch Display ──
+function addWatchEvent(evt) {
+  const el = document.createElement('div');
+  el.className = `watch-event type-${evt.type} color-${evt.color}`;
+
+  // Truncate label for watch (shorter than terminal)
+  const watchLabel = truncate(evt.label || '', 36);
+
+  el.innerHTML = `
+    <span class="icon">${esc(evt.icon)}</span>
+    <span class="label">${esc(watchLabel)}</span>
+    ${evt.detail ? `<span class="detail">${esc(evt.detail)}</span>` : ''}
+  `;
+
+  watchEvents.appendChild(el);
+
+  // Limit events on watch
+  while (watchEvents.children.length > MAX_WATCH_EVENTS) {
+    watchEvents.removeChild(watchEvents.firstChild);
+  }
+
+  // Auto-scroll
+  watchEvents.scrollTop = watchEvents.scrollHeight;
+}
+
+// ── Terminal Display ──
+function addTerminalLine(evt) {
+  const el = document.createElement('div');
+  el.className = `term-line c-${evt.color}`;
+
+  const timeStr = new Date(evt.timestamp).toLocaleTimeString('en', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+
+  el.innerHTML = `
+    <span class="t-icon">${esc(evt.icon)}</span>
+    <span class="t-text">${esc(evt.label || '')}${evt.detail ? ` <span style="color:var(--text-muted)">(${esc(evt.detail)})</span>` : ''}</span>
+    <span class="t-meta">${timeStr}</span>
+  `;
+
+  terminalBody.appendChild(el);
+
+  while (terminalBody.children.length > MAX_TERMINAL_LINES) {
+    terminalBody.removeChild(terminalBody.firstChild);
+  }
+
+  terminalBody.scrollTop = terminalBody.scrollHeight;
+}
+
+// ── Info Panel ──
+function updateInfo(evt) {
+  document.getElementById('infoEvents').textContent = eventCount;
+  if (evt) {
+    if (evt.type === 'init') {
+      document.getElementById('infoSession').textContent = 'Active';
+      document.getElementById('infoSession').style.color = 'var(--green)';
+    }
+    if (evt.type === 'result') {
+      document.getElementById('infoSession').textContent = evt.detail || 'Ended';
+      document.getElementById('infoSession').style.color = 'var(--text-muted)';
+    }
+  }
+  // Fetch mode from API
+  fetch('/api/status').then(r => r.json()).then(s => {
+    document.getElementById('infoMode').textContent = s.mode;
+    watchMode.textContent = s.mode;
+  }).catch(() => {});
+}
+
+// ── Send Prompt ──
+function sendPrompt() {
+  const input = document.getElementById('promptInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  // Send via WebSocket
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'prompt', text }));
+  }
+
+  // Also send via REST as fallback
+  fetch('/api/prompt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  }).catch(() => {});
+
+  input.value = '';
+  input.focus();
+}
+
+// ── Action Buttons ──
+function handleAccept() {
+  showToast('✓ Approved');
+  // In live mode, this would send approval to Claude Code
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'action', action: 'accept' }));
+  }
+}
+
+function handleReject() {
+  showToast('✗ Rejected', true);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'action', action: 'reject' }));
+  }
+}
+
+// ── Toast ──
+function showToast(text, isError = false) {
+  const toast = document.getElementById('toast');
+  const toastText = document.getElementById('toastText');
+  toastText.textContent = text;
+  toast.style.borderColor = isError ? 'rgba(248,113,113,0.3)' : 'rgba(74,222,128,0.3)';
+  toast.style.boxShadow = isError
+    ? '0 8px 32px rgba(0,0,0,0.5), 0 0 24px rgba(248,113,113,0.2)'
+    : '0 8px 32px rgba(0,0,0,0.5), 0 0 24px rgba(74,222,128,0.15)';
+  toast.classList.add('visible');
+  setTimeout(() => toast.classList.remove('visible'), 3000);
+}
+
+// ── Utils ──
+function esc(str) {
+  if (!str) return '';
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function truncate(str, max) {
+  return str.length > max ? str.substring(0, max - 1) + '…' : str;
+}
+
+// ── Init ──
+connect();
+updateInfo();
+</script>
+</body>
+</html>

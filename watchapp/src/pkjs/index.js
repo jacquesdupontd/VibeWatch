@@ -61,6 +61,16 @@ Pebble.addEventListener('ready', function() {
             }
             pending = payload;
             trySend();
+
+            // Also send CLEAN data if available
+            if (msg.cleanData) {
+                var cd = msg.cleanData;
+                var cleanStr = "CLEAN:" + (cd.userCmd || "") + "|" + (cd.summary || "") + "|" + (cd.status || "Ready");
+                // Send as separate message after a small delay
+                setTimeout(function() {
+                    Pebble.sendAppMessage({ "TERMINAL_DATA": cleanStr }, function(){}, function(){});
+                }, 50);
+            }
         }
     };
 

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pebble × Claude Code</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg-deep: #080b14;
+    --watch-bg: #0a0f0a;
+    --green: #4ade80;
+    --green-dim: #22c55e33;
+    --green-glow: #4ade8044;
+    --red: #f87171;
+    --red-dim: #f8717133;
+    --yellow: #fbbf24;
+    --cyan: #67e8f9;
+    --white: #e2e8f0;
+    --text-muted: #64748b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 24px 16px;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 50% 10%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 70% 80%, rgba(255,255,255,0.2), transparent),
+      radial-gradient(1px 1px at 90% 40%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 15% 85%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 60% 35%, rgba(255,255,255,0.25), transparent),
+      radial-gradient(ellipse at 20% 50%, #1a0a3a22, transparent 60%),
+      radial-gradient(ellipse at 80% 30%, #0a1a2a33, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .col { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+
+  /* Watch */
+  .band-top, .band-bottom {
+    width: 80px; margin: 0 auto;
+    background: linear-gradient(90deg, #1e2028 0%, #2a2d38 30%, #2a2d38 70%, #1e2028 100%);
+  }
+  .band-top { height: 50px; border-radius: 4px 4px 0 0; margin-bottom: -3px; }
+  .band-bottom { height: 50px; border-radius: 0 0 4px 4px; margin-top: -3px; }
+
+  .watch-body {
+    width: 200px;
+    background: linear-gradient(145deg, #33363f 0%, #25282f 40%, #1d2027 100%);
+    border-radius: 18px;
+    padding: 16px 14px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08);
+    position: relative;
+  }
+  .watch-body::before {
+    content: ''; position: absolute; right: -6px; top: 30%;
+    width: 6px; height: 24px;
+    background: linear-gradient(90deg, #33363f, #3a3d46);
+    border-radius: 0 3px 3px 0;
+  }
+  .watch-body::after {
+    content: ''; position: absolute; right: -6px; top: 55%;
+    width: 6px; height: 36px;
+    background: linear-gradient(90deg, #33363f, #3a3d46);
+    border-radius: 0 3px 3px 0;
+  }
+
+  .screen {
+    background: var(--watch-bg);
+    border-radius: 8px;
+    width: 172px; height: 220px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: inset 0 0 20px rgba(0,0,0,0.8), inset 0 0 4px rgba(74,222,128,0.05);
+    position: relative;
+  }
+  .screen::after {
+    content: ''; position: absolute; inset: 0;
+    background: repeating-linear-gradient(transparent 0px, transparent 2px, rgba(0,0,0,0.07) 2px, rgba(0,0,0,0.07) 4px);
+    pointer-events: none; z-index: 5;
+  }
+
+  .header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid rgba(74,222,128,0.15);
+    flex-shrink: 0;
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+  .title { font-size: 10px; font-weight: 600; color: var(--green); letter-spacing: .5px; }
+  .mode { margin-left: auto; font-size: 7px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+
+  .events {
+    flex: 1; overflow-y: auto; padding: 6px 8px;
+    display: flex; flex-direction: column; gap: 3px;
+    scrollbar-width: none;
+  }
+  .events::-webkit-scrollbar { display: none; }
+
+  .ev {
+    display: flex; align-items: flex-start; gap: 5px;
+    font-size: 9px; line-height: 1.3; padding: 2px 0; min-height: 14px;
+    animation: evIn .3s ease-out;
+  }
+  @keyframes evIn { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:translateY(0) } }
+  .ev .ic { flex-shrink: 0; width: 10px; text-align: center; font-weight: 700; }
+  .ev .lb { word-break: break-all; }
+  .ev .dt { color: var(--text-muted); font-size: 8px; margin-left: auto; flex-shrink: 0; }
+
+  .ev.c-green .ic, .ev.c-green .lb { color: var(--green); }
+  .ev.c-red .ic, .ev.c-red .lb { color: var(--red); }
+  .ev.c-yellow .ic { color: var(--yellow); }
+  .ev.c-yellow .lb { color: var(--white); }
+  .ev.c-cyan .ic, .ev.c-cyan .lb { color: var(--cyan); }
+  .ev.c-white .ic, .ev.c-white .lb { color: var(--white); }
+  .ev.c-white .lb { font-weight: 500; }
+  .ev.t-user { background: rgba(255,255,255,0.03); border-radius: 3px; padding: 3px 4px; margin: 1px -4px; }
+  .ev.t-result { border-top: 1px solid rgba(74,222,128,0.1); padding-top: 4px; margin-top: 2px; }
+
+  .actions {
+    display: flex; gap: 8px;
+    padding: 6px 10px 8px;
+    border-top: 1px solid rgba(74,222,128,0.1);
+    flex-shrink: 0;
+  }
+  .btn {
+    flex: 1; height: 26px; border: 1px solid; border-radius: 5px;
+    font-family: inherit; font-size: 12px; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all .15s; background: transparent;
+  }
+  .btn.ok { border-color: var(--green); color: var(--green); }
+  .btn.ok:hover { background: var(--green-dim); box-shadow: 0 0 12px var(--green-glow); }
+  .btn.no { border-color: var(--red); color: var(--red); }
+  .btn.no:hover { background: var(--red-dim); }
+
+  /* Terminal */
+  .term-col { max-width: 440px; min-width: 300px; position: relative; z-index: 1; }
+  .card {
+    background: rgba(13,17,23,0.85);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px; overflow: hidden;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    margin-bottom: 16px;
+  }
+  .tbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 14px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .td { width: 10px; height: 10px; border-radius: 50%; }
+  .td.r { background: #ff5f57; }
+  .td.y { background: #febc2e; }
+  .td.g { background: #28c840; }
+  .tbar span { margin-left: 8px; font-size: 11px; color: var(--text-muted); }
+
+  .tbody {
+    padding: 12px 14px; max-height: 380px; overflow-y: auto;
+    font-size: 12px; line-height: 1.6;
+  }
+  .tbody::-webkit-scrollbar { width: 4px; }
+  .tbody::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+  .tl {
+    display: flex; gap: 8px; padding: 2px 0;
+    animation: tlIn .25s ease-out;
+  }
+  @keyframes tlIn { from { opacity:0; transform:translateX(-8px) } to { opacity:1; transform:translateX(0) } }
+  .tl .ti { flex-shrink: 0; width: 16px; text-align: center; font-weight: 600; }
+  .tl .tt { word-break: break-word; }
+  .tl.c-green .ti,.tl.c-green .tt { color: var(--green); }
+  .tl.c-red .ti,.tl.c-red .tt { color: var(--red); }
+  .tl.c-yellow .ti { color: var(--yellow); }
+  .tl.c-yellow .tt { color: var(--white); }
+  .tl.c-cyan .ti,.tl.c-cyan .tt { color: var(--cyan); }
+  .tl.c-white .ti,.tl.c-white .tt { color: var(--white); font-weight: 500; }
+
+  /* Prompt */
+  .prompt { display: flex; gap: 6px; width: 220px; }
+  .prompt input {
+    flex: 1; background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;
+    padding: 8px 12px; color: var(--white);
+    font-family: inherit; font-size: 11px; outline: none;
+  }
+  .prompt input:focus { border-color: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+  .prompt input::placeholder { color: var(--text-muted); }
+  .prompt button {
+    width: 36px; height: 36px; background: var(--green);
+    border: none; border-radius: 8px; color: var(--bg-deep);
+    font-size: 16px; font-weight: 700; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .15s;
+  }
+  .prompt button:hover { background: #5eead4; transform: scale(1.05); }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: rgba(13,17,23,0.95);
+    border: 1px solid rgba(74,222,128,0.3);
+    border-radius: 12px; padding: 12px 20px;
+    font-size: 13px; color: var(--white);
+    display: flex; align-items: center; gap: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 24px var(--green-glow);
+    transition: transform .4s cubic-bezier(.34,1.56,.64,1);
+    z-index: 100; backdrop-filter: blur(12px);
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+
+  /* Status pill */
+  .pill {
+    position: fixed; top: 12px; right: 12px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 12px;
+    background: rgba(13,17,23,0.8);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 20px; font-size: 10px; color: var(--text-muted);
+    z-index: 50;
+  }
+  .pill .pd {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+  }
+
+  @media (max-width: 650px) {
+    body { flex-direction: column; align-items: center; }
+    .term-col { width: 100%; max-width: 360px; min-width: 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="pill"><div class="pd"></div> Demo mode</div>
+
+<div class="col">
+  <div>
+    <div class="band-top"></div>
+    <div class="watch-body">
+      <div class="screen">
+        <div class="header">
+          <div class="dot"></div>
+          <div class="title">Claude Code</div>
+          <div class="mode">demo</div>
+        </div>
+        <div class="events" id="wev"></div>
+        <div class="actions">
+          <button class="btn ok" onclick="toast('✓ Approved')">✓</button>
+          <button class="btn no" onclick="toast('✗ Rejected')">✗</button>
+        </div>
+      </div>
+    </div>
+    <div class="band-bottom"></div>
+  </div>
+  <div class="prompt">
+    <input id="pin" placeholder="send prompt..." onkeydown="if(event.key==='Enter')send()">
+    <button onclick="send()">›</button>
+  </div>
+</div>
+
+<div class="term-col">
+  <div class="card">
+    <div class="tbar">
+      <div class="td r"></div><div class="td y"></div><div class="td g"></div>
+      <span>claude — event stream</span>
+    </div>
+    <div class="tbody" id="term"></div>
+  </div>
+  <div class="card" style="padding:16px">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--green);font-weight:600;margin-bottom:10px">How it works</div>
+    <div style="font-size:11px;color:var(--text-muted);line-height:1.7">
+      This demo simulates a real Claude Code session parsed through the
+      <span style="color:var(--white)">pebble-claude-bridge</span> server.
+      The verbose stream-json output (thousands of token deltas) is filtered
+      down to compact, watch-friendly events.
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toastTxt"></span></div>
+
+<script>
+const wev = document.getElementById('wev');
+const term = document.getElementById('term');
+
+const MOCK = [
+  { d:600, type:'init', icon:'●', label:'Claude Code', detail:'7 tools', color:'green' },
+  { d:1400, type:'user', icon:'›', label:'run tests', color:'white' },
+  { d:2200, type:'assistant', icon:'◆', label:"I'll run the test suite for you.", color:'cyan' },
+  { d:2800, type:'tool_use', icon:'$', label:'npm test', color:'yellow' },
+  { d:4200, type:'tool_result', icon:'✓', label:'47 tests passed', color:'green' },
+  { d:4800, type:'assistant', icon:'◆', label:'All 47 tests passed. Everything looks good!', color:'cyan' },
+  { d:6500, type:'user', icon:'›', label:'fix the auth bug in src/auth.ts', color:'white' },
+  { d:7400, type:'assistant', icon:'◆', label:'Let me look at the auth module.', color:'cyan' },
+  { d:7900, type:'tool_use', icon:'◎', label:'read src/auth.ts', color:'yellow' },
+  { d:8800, type:'tool_result', icon:'✓', label:'84 lines output', color:'green' },
+  { d:9500, type:'assistant', icon:'◆', label:'Found it — token validation skips expiry check.', color:'cyan' },
+  { d:10200, type:'tool_use', icon:'✎', label:'edit auth.ts', color:'yellow' },
+  { d:11000, type:'tool_result', icon:'✓', label:'file edited', color:'green' },
+  { d:11800, type:'tool_use', icon:'$', label:'npm test -- auth', color:'yellow' },
+  { d:13000, type:'tool_result', icon:'✓', label:'12 tests passed', color:'green' },
+  { d:13600, type:'assistant', icon:'◆', label:'Auth bug fixed. Added expiry validation.', color:'cyan' },
+  { d:15500, type:'user', icon:'›', label:'ship it', color:'white' },
+  { d:16200, type:'assistant', icon:'◆', label:'Committing and deploying.', color:'cyan' },
+  { d:16800, type:'tool_use', icon:'$', label:'git add && commit && push', color:'yellow' },
+  { d:18200, type:'tool_result', icon:'✓', label:'pushed to main', color:'green' },
+  { d:18800, type:'assistant', icon:'◆', label:'Deployed! The fix is live on main.', color:'cyan' },
+  { d:19400, type:'result', icon:'■', label:'Done', detail:'6 turns $0.034', color:'green' },
+];
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+function addWatch(e) {
+  const el = document.createElement('div');
+  const lb = e.label && e.label.length > 36 ? e.label.slice(0,35)+'…' : e.label;
+  el.className = `ev t-${e.type} c-${e.color}`;
+  el.innerHTML = `<span class="ic">${esc(e.icon)}</span><span class="lb">${esc(lb)}</span>${e.detail?`<span class="dt">${esc(e.detail)}</span>`:''}`;
+  wev.appendChild(el);
+  while (wev.children.length > 30) wev.removeChild(wev.firstChild);
+  wev.scrollTop = wev.scrollHeight;
+}
+
+function addTerm(e) {
+  const el = document.createElement('div');
+  const t = new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  el.className = `tl c-${e.color}`;
+  el.innerHTML = `<span class="ti">${esc(e.icon)}</span><span class="tt">${esc(e.label)}${e.detail?` <span style="color:var(--text-muted)">(${esc(e.detail)})</span>`:''}</span>`;
+  term.appendChild(el);
+  while (term.children.length > 80) term.removeChild(term.firstChild);
+  term.scrollTop = term.scrollHeight;
+}
+
+function handle(e) {
+  addWatch(e);
+  addTerm(e);
+  if (e.type === 'result' && e.color === 'green') toast('🚀 Done!');
+}
+
+function toast(txt) {
+  const t = document.getElementById('toast');
+  document.getElementById('toastTxt').textContent = txt;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function send() {
+  const i = document.getElementById('pin');
+  const t = i.value.trim();
+  if (!t) return;
+  handle({ type:'user', icon:'›', label:t, color:'white' });
+  handle({ type:'assistant', icon:'◆', label:'(demo mode — connect server for live)', color:'cyan' });
+  i.value = '';
+}
+
+// Play mock session
+let idx = 0;
+function play() {
+  if (idx >= MOCK.length) {
+    setTimeout(() => {
+      wev.innerHTML = '';
+      term.innerHTML = '';
+      idx = 0;
+      play();
+    }, 4000);
+    return;
+  }
+  const e = MOCK[idx];
+  const delay = idx === 0 ? e.d : e.d - MOCK[idx-1].d;
+  setTimeout(() => { handle(e); idx++; play(); }, delay);
+}
+play();
+</script>
+</body>
+</html>

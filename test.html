@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>VibeCoder - Pebble Simulator</title>
+</head>
+
+<body style="background:#222;color:white;font-family:monospace;margin:0;padding:20px">
+    <h2>VibeCoder - Pebble Terminal Simulator</h2>
+
+    <!-- Simulated Pebble screen -->
+    <div
+        style="display:inline-block;background:#000;border:8px solid #555;border-radius:12px;padding:4px;width:144px;height:168px;overflow:hidden;position:relative">
+        <div id="screen"
+            style="width:144px;height:168px;overflow-y:auto;color:cyan;font-size:11px;line-height:1.2;word-break:break-all;white-space:pre-wrap">
+        </div>
+    </div>
+
+    <div style="margin-top:10px">
+        <input id="cmd" type="text" placeholder="Commande..."
+            style="background:#333;color:white;border:1px solid #555;padding:6px;width:250px;font-family:monospace" />
+        <button onclick="sendCmd()" style="padding:6px 12px">Envoyer</button>
+        <span id="status" style="margin-left:10px;color:gray">Deconnecte</span>
+    </div>
+
+    <script>
+        const screen = document.getElementById('screen');
+        const status = document.getElementById('status');
+        const cmdInput = document.getElementById('cmd');
+        let ws;
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8080');
+            ws.onopen = () => { status.textContent = 'Connecte'; status.style.color = 'lime'; };
+            ws.onclose = () => { status.textContent = 'Deconnecte'; status.style.color = 'red'; setTimeout(connect, 2000); };
+            ws.onerror = () => { };
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'output') {
+                    screen.textContent += msg.content;
+                    screen.scrollTop = screen.scrollHeight;
+                }
+            };
+        }
+
+        function sendCmd() {
+            const cmd = cmdInput.value;
+            if (ws && ws.readyState === 1 && cmd) {
+                ws.send(JSON.stringify({ type: 'prompt', content: cmd }));
+                cmdInput.value = '';
+            }
+        }
+
+        cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCmd(); });
+        connect();
+    </script>
+</body>
+
+</html>
