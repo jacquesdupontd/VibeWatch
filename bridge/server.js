@@ -473,26 +473,36 @@ function extractCleanDataFromTranscript(transcriptPath) {
 }
 
 // Extract real-time status from tmux (fun words like Cogitating, Baking, etc.)
+// Use REGEX to match any "Word..." pattern, with BLACKLIST of false positives
+const STATUS_BLACKLIST = [
+    'Reading', 'Writing', 'Installing', 'Creating', 'Processing',
+    'Building', 'Compiling', 'Running', 'Checking', 'Loading',
+    'Updating', 'Searching', 'Connecting', 'Downloading', 'Uploading'
+];
+
 function extractRealtimeStatus(raw) {
-    // Clean ANSI codes for easier parsing
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
     const lines = cleaned.split('\n');
 
-    // Check last 20 lines for status patterns
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
+    // Check last 30 lines for status patterns
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
         const line = lines[i].trim();
         if (!line) continue;
 
-        // Pattern 1: "Word..." or "Word…" (thinking indicator)
-        // Matches: ✳ Crystallizing..., Cogitating…, etc. (anywhere in line)
-        const thinkMatch = line.match(/([A-Z][a-z]+)(\.{3}|…)/);
+        // Pattern 1: Any "Word..." or "Word…" (thinking indicator)
+        // Must start with status indicators (·, ✳, ✶, ✽, *, etc.) or be standalone
+        const thinkMatch = line.match(/[·✳✶✽*]?\s*([A-Z][a-z]+)(\.{3}|…)/);
         if (thinkMatch) {
-            return thinkMatch[1] + '...';
+            const word = thinkMatch[1];
+            // Skip blacklisted words (tool outputs, not thinking)
+            if (!STATUS_BLACKLIST.includes(word)) {
+                return word + '...';
+            }
         }
 
-        // Pattern 2: "Word for Xs" or "Word for Xm Ys" (done indicator)
-        // Matches: "Thought for 2s", "Baked for 1m 30s", "Cogitated for 50s"
-        if (/[A-Z][a-z]+\s+for\s+\d+[ms]/.test(line)) {
+        // Pattern 2: "Word for Xs" (done indicator) - past tense thinking
+        const doneMatch = line.match(/([A-Z][a-z]+)\s+for\s+\d+[ms]/);
+        if (doneMatch) {
             return 'Done';
         }
 
@@ -501,7 +511,197 @@ function extractRealtimeStatus(raw) {
             return 'Done';
         }
     }
-    return null; // No fun word found, use transcript status
+    return null;
+}
+
+// Extract real-time tool use from tmux output (since JSONL is delayed)
+function extractRealtimeTool(raw) {
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    // Scan from bottom for recent tool activity
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Tool headers from Claude Code: "⏺ Bash(...)" "⏺ Read(...)" etc.
+        // Match with optional bullet prefix (⏺, *, -)
+        const toolMatch = line.match(/^[⏺*-]?\s*(Read|Write|Edit|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP)\s*\(/i);
+        if (toolMatch) {
+            const name = toolMatch[1];
+            // Extract parameter in parentheses (may span multiple lines, just get first part)
+            const paramMatch = line.match(/\(([^)\n]+)/);
+            let param = paramMatch ? paramMatch[1] : '';
+            // Clean up truncation markers
+            param = param.replace(/…\)?$/, '').trim();
+
+            // Format based on tool type
+            switch (name.toLowerCase()) {
+                case 'bash':
+                    let cmd = param.replace(/cd\s+[^\s&|;]+\s*[;&|]*\s*/g, '').trim();
+                    // Remove quotes
+                    cmd = cmd.replace(/^["']|["']$/g, '');
+                    if (cmd.length > 35) cmd = cmd.substring(0, 32) + '...';
+                    return '$ ' + (cmd || 'running...');
+                case 'read':
+                    return 'read ' + param.split('/').pop();
+                case 'write':
+                    return 'write ' + param.split('/').pop();
+                case 'edit':
+                    return 'edit ' + param.split('/').pop();
+                case 'grep':
+                    return 'grep ' + param.substring(0, 25);
+                case 'glob':
+                    return 'glob ' + param;
+                case 'task':
+                    return 'agent ' + param.substring(0, 25);
+                case 'webfetch':
+                    return 'fetch ' + param.substring(0, 25);
+                case 'websearch':
+                    return 'search ' + param.substring(0, 25);
+                default:
+                    return name + ' ' + param.substring(0, 20);
+            }
+        }
+
+        // Also match $ command lines (bash execution)
+        if (/^\$\s+\S/.test(line)) {
+            let cmd = line.substring(1).trim();
+            if (cmd.length > 35) cmd = cmd.substring(0, 32) + '...';
+            return '$ ' + cmd;
+        }
+    }
+    return null;
+}
+
+// Extract real-time assistant text from tmux (bullets and text)
+// Claude's text format: ⏺ starts a paragraph, continuation lines are indented (may have - bullets)
+function extractRealtimeText(raw) {
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    // Find Claude paragraphs: lines starting with ⏺ (not tool calls) + their continuations
+    const paragraphs = [];
+    let currentParagraph = null;
+    let lastWasEmpty = false;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            lastWasEmpty = true;
+            continue;  // Don't end paragraph on empty line - wait for next content
+        }
+
+        // Skip UI noise
+        if (/^[-=─━]{3,}/.test(trimmed)) { lastWasEmpty = false; continue; }
+        if (/Context left|esc to interrupt|ctrl\+[a-z]/.test(trimmed)) { lastWasEmpty = false; continue; }
+        if (/^\d+\s+files?\s+\+/.test(trimmed)) { lastWasEmpty = false; continue; }
+        if (/^[●✢✳✶·]/.test(trimmed)) { lastWasEmpty = false; continue; }
+        if (/^❯/.test(trimmed)) { lastWasEmpty = false; continue; }
+        if (/^⎿/.test(trimmed)) { lastWasEmpty = false; continue; }  // Tool output marker
+
+        // New Claude paragraph: starts with ⏺ and is NOT a tool call
+        if (trimmed.startsWith('⏺')) {
+            // Save previous paragraph
+            if (currentParagraph) paragraphs.push(currentParagraph);
+
+            // Skip if it's a tool call line
+            if (/^⏺\s*(Read|Write|Edit|Update|Bash|Grep|Glob|Task|WebFetch|WebSearch|LSP|NotebookEdit)\s*[\(\d]/i.test(trimmed)) {
+                currentParagraph = null;
+                lastWasEmpty = false;
+                continue;
+            }
+            if (/^⏺\s*(Read|Edit|Write|Bash|Grep|Glob)\s+\d+\s+(file|line)/i.test(trimmed)) {
+                currentParagraph = null;
+                lastWasEmpty = false;
+                continue;
+            }
+
+            // Start new paragraph
+            currentParagraph = trimmed.replace(/^⏺\s*/, '').trim();
+            lastWasEmpty = false;
+            continue;
+        }
+
+        // Continuation: indented line (spaces at start) - include dash bullets
+        // These can come after empty lines if they're part of Claude's formatted output
+        if (/^\s{2,}/.test(line) && !trimmed.startsWith('⏺') && !trimmed.startsWith('⎿')) {
+            if (/\(ctrl\+[a-z]\s+to\s+(expand|collapse)\)/i.test(trimmed)) {
+                lastWasEmpty = false;
+                continue;
+            }
+            // Skip diff/code lines
+            if (/^\d+\s*[-+]/.test(trimmed)) { lastWasEmpty = false; continue; }  // Diff line numbers
+            if (/^[-+]\s*(function|const|let|var|if|for|while|return|import|export|class)\s/.test(trimmed)) { lastWasEmpty = false; continue; }
+            if (/^\s*[\{\}\[\]];?\s*$/.test(trimmed)) { lastWasEmpty = false; continue; }  // Just braces
+            if (/^(Added|Removed|Modified)\s+\d+\s+line/.test(trimmed)) { lastWasEmpty = false; continue; }
+            // Skip lines that look like code (lots of special chars)
+            if ((trimmed.match(/[{}();=><]/g) || []).length > 3) { lastWasEmpty = false; continue; }
+
+            if (currentParagraph) {
+                // Continue the paragraph
+                currentParagraph += ' ' + trimmed;
+            }
+            // If no current paragraph but this looks like Claude text (starts with - bullet), start new
+            else if (/^-\s+[A-Z]/.test(trimmed)) {
+                currentParagraph = trimmed;
+            }
+            lastWasEmpty = false;
+            continue;
+        }
+
+        // Non-indented, non-⏺ line that's not noise: ends current paragraph
+        if (currentParagraph) {
+            paragraphs.push(currentParagraph);
+            currentParagraph = null;
+        }
+        lastWasEmpty = false;
+    }
+
+    // Don't forget the last paragraph
+    if (currentParagraph) paragraphs.push(currentParagraph);
+
+    // Take the last few paragraphs (most recent Claude text)
+    if (paragraphs.length > 0) {
+        const recent = paragraphs.slice(-3);
+        let summary = recent.join(' ');
+        if (summary.length > 800) {
+            summary = '...' + summary.substring(summary.length - 797);
+        }
+        return summary;
+    }
+    return null;
+}
+
+// Extract user's prompt from tmux (❯ lines)
+function extractUserPrompt(raw) {
+    const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const lines = cleaned.split('\n');
+
+    // Find the most recent user prompt (❯ followed by text)
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Look for prompt markers followed by actual user text
+        // Skip empty prompts and suggestion lines
+        const promptMatch = line.match(/[❯>]\s+(.+)/);
+        if (promptMatch) {
+            let text = promptMatch[1].trim();
+            // Skip if it looks like a suggestion (dim text) or UI
+            if (text.length < 3) continue;
+            if (/^─+$/.test(text)) continue;
+            if (/^\d+\s+file/.test(text)) continue;
+            // This looks like a real user prompt
+            if (text.length > 50) {
+                text = '...' + text.substring(text.length - 47);
+            }
+            return text;
+        }
+    }
+    return null;
 }
 
 // Session management
@@ -550,8 +750,9 @@ wss.on('connection', (ws) => {
         pollInterval = setInterval(() => {
             if (!activeSession) return;
             try {
+                // Capture more history (-S -200 = start 200 lines back)
                 const raw = execSync(
-                    `tmux capture-pane -t "${activeSession}" -p -e 2>/dev/null`,
+                    `tmux capture-pane -t "${activeSession}" -p -e -S -200 2>/dev/null`,
                     { encoding: 'utf8', timeout: 2000 }
                 );
                 const promptType = detectPrompt(raw);
@@ -588,14 +789,35 @@ wss.on('connection', (ws) => {
                 if (transcriptPath) {
                     cleanData = extractCleanDataFromTranscript(transcriptPath);
                 } else {
-                    cleanData = { userCmd: '', summary: '', status: 'Ready' };
+                    cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
                 }
 
-                // Override status with real-time fun words from tmux (Cogitating, Baking, etc.)
+                // Override with real-time data from tmux (JSONL is delayed during streaming)
                 const realtimeStatus = extractRealtimeStatus(raw);
                 if (realtimeStatus) {
                     cleanData.status = realtimeStatus;
                 }
+
+                const realtimeTool = extractRealtimeTool(raw);
+                if (realtimeTool) {
+                    cleanData.lastTool = realtimeTool;
+                }
+
+                const realtimeText = extractRealtimeText(raw);
+                if (realtimeText) {
+                    cleanData.summary = realtimeText;
+                }
+
+                // Extract user prompt from tmux if not found in JSONL
+                if (!cleanData.userCmd || cleanData.userCmd.length < 5) {
+                    const userPrompt = extractUserPrompt(raw);
+                    if (userPrompt) {
+                        cleanData.userCmd = userPrompt;
+                    }
+                }
+
+                // Debug: log cleanData
+                console.log('CLEAN:', JSON.stringify(cleanData));
 
                 if (cleanData) msg.cleanData = cleanData;
 

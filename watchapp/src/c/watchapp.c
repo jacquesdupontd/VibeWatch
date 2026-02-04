@@ -25,9 +25,11 @@ static char s_active_session[32] = "";
 typedef enum { MODE_VERBOSE, MODE_CLEAN } DisplayMode;
 static DisplayMode s_display_mode = MODE_VERBOSE;
 static char s_user_cmd[128] = "";
-static char s_claude_summary[256] = "";
+static char s_claude_summary[1024] = "";  // Larger buffer for multiple paragraphs
 static char s_status[32] = "Ready";
 static char s_last_tool[64] = "";
+static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
+static int s_clean_total_h = 0; // Total content height in CLEAN mode
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -340,51 +342,93 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   GFont body = fonts_get_system_font(FONT_KEY_GOTHIC_14);
   GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
 
-  // Layout: Claude response on top, user prompt at bottom
-  int prompt_h = 36;
+  // Fixed zones at bottom
   int status_h = 18;
-  int bottom_y = bounds.size.h - prompt_h - status_h;
-
-  // Claude response (top, green) - leave room for tool below
   int tool_h = s_last_tool[0] ? 16 : 0;
+  int user_h = 0;  // Disabled - extraction unreliable
+  int fixed_bottom = status_h + tool_h + 4;
+
+  // Content zone (visible area for text)
+  int content_h = bounds.size.h - fixed_bottom;
+  int content_w = bounds.size.w - 8;
+
+  // Draw Claude text (green) - show END of text by default (like VERBOSE mode)
   if (s_claude_summary[0]) {
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(0, 0, bounds.size.w, content_h), 0, GCornerNone);
+
+    int len = strlen(s_claude_summary);
+
+    // s_clean_scroll = -1 means "auto-scroll to end" (default)
+    // s_clean_scroll >= 0 means manual offset from start
+    int start;
+    if (s_clean_scroll < 0) {
+      // Auto: show END of text - calculate offset to show last ~150 chars
+      start = len > 150 ? len - 150 : 0;
+    } else {
+      start = s_clean_scroll;
+      if (start >= len) start = len > 150 ? len - 150 : 0;
+    }
+
+    // Find word boundary
+    if (start > 0 && start < len) {
+      while (start > 0 && s_claude_summary[start] != ' ') start--;
+      if (s_claude_summary[start] == ' ') start++;
+    }
+
+    // Draw from offset
     graphics_context_set_text_color(ctx, GColorMintGreen);
-    graphics_draw_text(ctx, s_claude_summary, body,
-        GRect(4, 4, bounds.size.w - 8, bottom_y - tool_h - 12), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, s_claude_summary + start, body,
+        GRect(4, 2, content_w, content_h - 4),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+    // Scroll indicators
+    if (start > 0) {
+      // Dot at top - can scroll UP to see earlier content
+      graphics_context_set_fill_color(ctx, GColorCyan);
+      graphics_fill_rect(ctx, GRect(bounds.size.w - 6, 4, 4, 4), 0, GCornerNone);
+    }
   }
 
-  // Last tool used (cyan, above separator)
+  // Clear and draw fixed bottom section
+  int y = bounds.size.h - fixed_bottom;
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(0, y, bounds.size.w, fixed_bottom), 0, GCornerNone);
+
+  // Separator line
+  graphics_context_set_stroke_color(ctx, GColorDarkGray);
+  graphics_draw_line(ctx, GPoint(10, y), GPoint(bounds.size.w - 10, y));
+  y += 2;
+
+  // Last tool (cyan)
   if (s_last_tool[0]) {
     graphics_context_set_text_color(ctx, GColorCyan);
     graphics_draw_text(ctx, s_last_tool, small,
-        GRect(4, bottom_y - tool_h - 2, bounds.size.w - 8, tool_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+        GRect(4, y, bounds.size.w - 8, tool_h),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += tool_h;
   }
 
-  // Separator
-  graphics_context_set_stroke_color(ctx, GColorDarkGray);
-  graphics_draw_line(ctx, GPoint(10, bottom_y), GPoint(bounds.size.w - 10, bottom_y));
-
-  // User command (bottom, yellow) - show END of text if too long
+  // User command (yellow)
   if (s_user_cmd[0]) {
     graphics_context_set_text_color(ctx, GColorYellow);
     int len = strlen(s_user_cmd);
     const char *display = s_user_cmd;
-    // If too long, show "...end of prompt"
-    if (len > 40) {
-      display = s_user_cmd + len - 37;  // Show last ~37 chars
-    }
+    if (len > 40) display = s_user_cmd + len - 37;
     graphics_draw_text(ctx, display, small,
-        GRect(4, bottom_y + 2, bounds.size.w - 8, prompt_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+        GRect(4, y, bounds.size.w - 8, user_h),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += user_h;
   }
 
-  // Status bar at very bottom
+  // Status bar (colored based on status)
   int status_y = bounds.size.h - status_h;
   GColor status_bg = GColorDarkGray;
   GColor status_fg = GColorWhite;
-  if (strstr(s_status, "Baking") || strstr(s_status, "Running") || strstr(s_status, "Thinking")) {
+  if (strstr(s_status, "...") || strstr(s_status, "Working")) {
     status_bg = GColorOrange;
     status_fg = GColorBlack;
-  } else if (strstr(s_status, "Done") || strstr(s_status, "Brewed")) {
+  } else if (strstr(s_status, "Done") || strstr(s_status, "Ready")) {
     status_bg = GColorIslamicGreen;
     status_fg = GColorWhite;
   } else if (strstr(s_status, "Error") || strstr(s_status, "Failed")) {
@@ -396,12 +440,14 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
   graphics_fill_rect(ctx, GRect(0, status_y, bounds.size.w, status_h), 0, GCornerNone);
   graphics_context_set_text_color(ctx, status_fg);
   graphics_draw_text(ctx, s_status, small,
-      GRect(4, status_y, bounds.size.w - 8, status_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+      GRect(4, status_y, bounds.size.w - 8, status_h),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
   // Mode indicator
   graphics_context_set_text_color(ctx, GColorDarkGray);
   graphics_draw_text(ctx, "CLEAN", fonts_get_system_font(FONT_KEY_GOTHIC_09),
-      GRect(bounds.size.w - 30, 0, 28, 10), GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+      GRect(bounds.size.w - 30, 0, 28, 10),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 }
 
 static void draw_menu(GContext *ctx, GRect bounds) {
@@ -604,6 +650,14 @@ static void inbox_received_callback(DictionaryIterator *iterator,
 
     // CLEAN:cmd|summary|status|tool - structured data for clean mode
     if (strncmp(data, "CLEAN:", 6) == 0) {
+      // Auto-scroll to end when new content arrives
+      s_clean_scroll = -1;
+
+      // Clear buffers first to avoid stale data
+      s_user_cmd[0] = '\0';
+      s_claude_summary[0] = '\0';
+      s_last_tool[0] = '\0';
+
       const char *p = data + 6;
       const char *sep1 = strchr(p, '|');
       if (sep1) {
@@ -615,7 +669,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         const char *sep2 = strchr(p, '|');
         if (sep2) {
           len = (int)(sep2 - p);
-          if (len > 255) len = 255;
+          if (len > 1023) len = 1023;  // Match buffer size
           strncpy(s_claude_summary, p, len);
           s_claude_summary[len] = '\0';
           p = sep2 + 1;
@@ -635,6 +689,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           }
         }
       }
+
       layer_mark_dirty(s_canvas);
       return;
     }
@@ -802,6 +857,17 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_has_prompt) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
+  } else if (s_display_mode == MODE_CLEAN) {
+    // Page UP - show earlier content (scroll toward beginning)
+    int len = strlen(s_claude_summary);
+    int current = (s_clean_scroll < 0) ? (len > 150 ? len - 150 : 0) : s_clean_scroll;
+    if (current > 0) {
+      s_clean_scroll = current - 120;
+      if (s_clean_scroll < 0) s_clean_scroll = 0;
+      layer_mark_dirty(s_canvas);
+    } else {
+      vibes_short_pulse();  // Already at top
+    }
   } else {
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
@@ -844,6 +910,21 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_has_prompt) {
     send_key(s_prompt_keys[2]);
     vibes_double_pulse();
+  } else if (s_display_mode == MODE_CLEAN) {
+    // Page DOWN - show more recent content (toward end)
+    // If already at auto (-1) or near end, stay at auto
+    if (s_clean_scroll >= 0) {
+      int len = strlen(s_claude_summary);
+      int max_offset = len > 150 ? len - 150 : 0;
+      if (s_clean_scroll + 120 >= max_offset) {
+        s_clean_scroll = -1;  // Back to auto (show end)
+      } else {
+        s_clean_scroll += 120;
+      }
+      layer_mark_dirty(s_canvas);
+    } else {
+      vibes_short_pulse();  // Already at end (auto mode)
+    }
   } else {
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;

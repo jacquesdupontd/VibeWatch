@@ -65,8 +65,12 @@ Pebble.addEventListener('ready', function() {
             // Also send CLEAN data if available
             if (msg.cleanData) {
                 var cd = msg.cleanData;
+                // Sanitize: replace pipe chars to avoid breaking the format
+                function sanitize(s) {
+                    return (s || "").replace(/\|/g, " ");
+                }
                 // Format: CLEAN:userCmd|summary|status|lastTool
-                var cleanStr = "CLEAN:" + (cd.userCmd || "") + "|" + (cd.summary || "") + "|" + (cd.status || "Ready") + "|" + (cd.lastTool || "");
+                var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool);
                 // Send as separate message after a small delay
                 setTimeout(function() {
                     Pebble.sendAppMessage({ "TERMINAL_DATA": cleanStr }, function(){}, function(){});
