@@ -108,6 +108,71 @@ function clean(str) {
         .replace(/[^\x20-\x7E\n]/g, '');
 }
 
+function stripAccents(str) {
+    if (!str) return str;
+    // Replace common French accents with ASCII equivalents
+    return str
+        .replace(/à|á|â|ä|ã|å/g, 'a')
+        .replace(/À|Á|Â|Ä|Ã|Å/g, 'A')
+        .replace(/ç/g, 'c')
+        .replace(/Ç/g, 'C')
+        .replace(/è|é|ê|ë/g, 'e')
+        .replace(/È|É|Ê|Ë/g, 'E')
+        .replace(/ì|í|î|ï/g, 'i')
+        .replace(/Ì|Í|Î|Ï/g, 'I')
+        .replace(/ñ/g, 'n')
+        .replace(/Ñ/g, 'N')
+        .replace(/ò|ó|ô|ö|õ/g, 'o')
+        .replace(/Ò|Ó|Ô|Ö|Õ/g, 'O')
+        .replace(/ù|ú|û|ü/g, 'u')
+        .replace(/Ù|Ú|Û|Ü/g, 'U')
+        .replace(/ý|ÿ/g, 'y')
+        .replace(/Ý/g, 'Y');
+}
+
+function formatForClean(text) {
+    if (!text) return text;
+    let t = text.replace(/\r/g, '');
+    // Remove markdown bold/italic markers
+    t = t.replace(/\*\*/g, '').replace(/\*/g, '');
+    // Normalize bullet styles to "- "
+    t = t.replace(/^\s*[•–—]\s+/gm, '- ');
+    // Keep line breaks, but cap excessive blank lines
+    t = t.replace(/\n{3,}/g, '\n\n');
+    return t.trim();
+}
+
+function clampText(str, maxLen) {
+    if (!str) return str;
+    if (str.length <= maxLen) return str;
+    return str.substring(0, maxLen - 3) + '...';
+}
+
+function clampTextEnd(str, maxLen) {
+    if (!str) return str;
+    if (str.length <= maxLen) return str;
+    return '...' + str.substring(str.length - (maxLen - 3));
+}
+
+function firstLineWithEllipsis(str, maxLen) {
+    if (!str) return str;
+    const parts = str.split('\n');
+    let line = parts[0] || '';
+    let hasMore = parts.length > 1;
+    if (line.length > maxLen) {
+        line = '...' + line.substring(line.length - (maxLen - 3));
+    }
+    if (hasMore) {
+        if (line.length + 4 > maxLen) {
+            line = line.substring(0, Math.max(0, maxLen - 4)) + '...';
+        } else {
+            line = line + ' ...';
+        }
+    }
+    return line;
+}
+
+
 function detectPrompt(raw) {
     const cleaned = clean(raw);
 
@@ -979,7 +1044,7 @@ wss.on('connection', (ws) => {
 
                 if (jsonlPath) {
                     console.log('[JSONL] Using direct .jsonl parsing (clean & structured)');
-                    const events = parseRecentJsonl(jsonlPath, 100);
+                    const events = parseRecentJsonl(jsonlPath, 300);
                     cleanData = extractCleanData(events);
 
                     // Add structured info
@@ -991,31 +1056,17 @@ wss.on('connection', (ws) => {
                         activeTask: cleanData.activeTask || ''
                     };
 
-                    // Capture terminal for suggestions AND interactive prompts
+                    // Capture terminal ONLY for thinking word (status) and interactive prompts
                     try {
                         const raw = execSync(
                             `tmux capture-pane -t "${activeSession}" -p -e -S -50 2>/dev/null`,
                             { encoding: 'utf8', timeout: 1000 }
                         );
-
-                        // 1. Detect dynamic suggestions (ghost text)
-                        const rawLines = raw.split('\n');
-                        for (let i = rawLines.length - 1; i >= 0; i--) {
-                            const rl = rawLines[i];
-                            if (!rl.includes('❯') && !rl.includes('>')) continue;
-                            if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
-                                let sugText = rl.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
-                                if (sugText.startsWith('> ')) sugText = sugText.substring(2).trim();
-                                if (sugText.startsWith('❯ ')) sugText = sugText.substring(2).trim();
-                                if (sugText && sugText.length > 2) {
-                                    suggestion = sugText;
-                                    console.log('[SUGGESTION]', suggestion.substring(0, 50));
-                                }
-                            }
-                            break;
+                        const realtimeStatus = extractRealtimeStatus(raw);
+                        if (realtimeStatus) {
+                            cleanData.status = realtimeStatus;
+                            console.log('[REALTIME STATUS]', realtimeStatus);
                         }
-
-                        // 2. Detect interactive prompts (Yes/No)
                         const prompt = detectPrompt(raw);
                         if (prompt) {
                             cleanData.prompt = prompt;
@@ -1075,6 +1126,33 @@ wss.on('connection', (ws) => {
                         cleanData.summary = `[${cleanData.status}]...`;
                     } else {
                         cleanData.summary = "[No active data in this session]";
+                    }
+                }
+
+                // Normalize accents and preserve bullets/newlines for CLEAN mode
+                cleanData.summary = stripAccents(formatForClean(cleanData.summary));
+                cleanData.userCmd = stripAccents(cleanData.userCmd || '');
+                cleanData.lastTool = stripAccents(cleanData.lastTool || '');
+                cleanData.status = stripAccents(cleanData.status || '');
+                cleanData.activeTask = stripAccents(cleanData.activeTask || '');
+                cleanData.suggestion = stripAccents(cleanData.suggestion || '');
+
+                // Clamp to avoid AppMessage overflow
+                cleanData.summary = clampTextEnd(cleanData.summary, 700);
+                cleanData.userCmd = firstLineWithEllipsis(cleanData.userCmd, 160);
+                cleanData.lastTool = clampText(cleanData.lastTool, 80);
+                cleanData.status = clampText(cleanData.status, 40);
+                cleanData.activeTask = clampText(cleanData.activeTask, 80);
+                cleanData.suggestion = clampText(cleanData.suggestion, 120);
+
+                // If status is stuck on Working but no active task/tool, mark Ready
+                if (cleanData.status &&
+                    cleanData.status.toLowerCase().includes('working') &&
+                    !cleanData.activeTask && !cleanData.lastTool) {
+                    // Don't override JSONL thinking words like "Razzle-dazzling..."
+                    if (!cleanData.status.endsWith('...') &&
+                        cleanData.summary && cleanData.summary.length > 0) {
+                        cleanData.status = 'Ready';
                     }
                 }
 

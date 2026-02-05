@@ -1,5 +1,6 @@
 #include <pebble.h>
 #include <stdlib.h>
+#include <stdlib.h>
 
 static Window *s_window;
 static Layer *s_canvas;
@@ -49,6 +50,9 @@ static char s_last_tool[256] = "";   // Increased for long commands
 static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[128] = ""; // Increased for long task names
 static bool s_task_running = false;  // Is a task currently running?
+static char s_prev_clean_cmd[128] = "";
+static char s_prev_clean_summary[1024] = "";
+static char s_prev_clean_status[32] = "Ready";
 
 // Marquee duplicate buffers for seamless infinite scroll (2 full copies +
 // separator)
@@ -58,6 +62,13 @@ static char s_status_marquee_buf[600] = "";
 static char s_claude_marquee_buf[2100] = ""; // 1024 * 2 + small separator
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
 static int s_marquee_offset = 0; // For horizontal marquee (commands)
+
+// CLEAN history (no auto-scroll): navigate blocks with UP/DOWN
+#define CLEAN_HISTORY_MAX 12
+static char s_clean_history[CLEAN_HISTORY_MAX][1024];
+static int s_clean_hist_count = 0;
+static int s_clean_hist_index = -1;
+static char s_clean_scroll_src[1024] = "";
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -88,6 +99,7 @@ static int s_page_step = 168;
 static void start_command_marquee();
 static void start_prompt_marquee();
 static void start_status_marquee();
+static void start_claude_scroll();
 static void create_clean_layers();
 static void claude_scroll_stopped(Animation *animation, bool finished,
                                   void *context);
@@ -95,6 +107,48 @@ static void fx_update(Layer *layer, GContext *ctx);
 static void fx_tick(void *data);
 static void trigger_glitch_short();
 static void trigger_glitch_text();
+
+static void clean_show_history_index(int idx) {
+  if (!s_clean_claude_layer)
+    return;
+  if (idx < 0 || idx >= s_clean_hist_count)
+    return;
+
+  strncpy(s_clean_scroll_src, s_clean_history[idx],
+          sizeof(s_clean_scroll_src) - 1);
+  s_clean_scroll_src[sizeof(s_clean_scroll_src) - 1] = '\0';
+
+  text_layer_set_text(s_clean_claude_layer, s_clean_scroll_src);
+  layer_set_hidden(text_layer_get_layer(s_clean_claude_layer),
+                   s_clean_scroll_src[0] == '\0');
+
+  // Measure to decide if we should auto-scroll (long blocks)
+  GSize size = text_layer_get_content_size(s_clean_claude_layer);
+  bool too_long = (size.h > (10 * 14)); // >10 lines
+
+  // Stop any existing scroll
+  if (s_claude_scroll_anim) {
+    animation_unschedule(
+        property_animation_get_animation(s_claude_scroll_anim));
+    property_animation_destroy(s_claude_scroll_anim);
+    s_claude_scroll_anim = NULL;
+  }
+
+  if (too_long) {
+    s_auto_scroll_enabled = true;
+    start_claude_scroll();
+  } else {
+    s_auto_scroll_enabled = false;
+    int h = size.h < 111 ? 111 : size.h;
+    // Always show the END of the text when not scrolling
+    int y = 0;
+    if (size.h > 111) {
+      y = 111 - size.h; // negative offset so bottom lines are visible
+    }
+    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
+                    GRect(4, y, 136, h));
+  }
+}
 
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
@@ -619,58 +673,40 @@ static void start_claude_scroll() {
     s_claude_scroll_anim = NULL;
   }
 
-  if (s_claude_summary[0] == '\0')
+  if (s_clean_scroll_src[0] == '\0')
     return;
 
-  // 1. Prepare duplicated buffer for seamless loop
   // Measure single instance first
-  text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+  text_layer_set_text(s_clean_claude_layer, s_clean_scroll_src);
   GSize single_size = text_layer_get_content_size(s_clean_claude_layer);
-  int H = single_size.h;
-  int cycle_H = H + 28; // 28px for \n\n\n\n at Gothic 14
+  int cycle_H = single_size.h + 14; // small gap for seamless loop
 
-  if (H > 111) { // Visible area is 111px
-    // The user wants it to continue itself after 2 line breaks
-    snprintf(s_claude_marquee_buf, sizeof(s_claude_marquee_buf), "%s\n\n\n\n%s",
-             s_claude_summary, s_claude_summary);
-    text_layer_set_text(s_clean_claude_layer, s_claude_marquee_buf);
+  // Duplicate for continuous scroll (no pause)
+  snprintf(s_claude_marquee_buf, sizeof(s_claude_marquee_buf), "%s\n\n%s",
+           s_clean_scroll_src, s_clean_scroll_src);
+  text_layer_set_text(s_clean_claude_layer, s_claude_marquee_buf);
 
-    int cycle_H = H + 28; // 28px for \n\n\n\n at Gothic 14
-
-    // Start position: If s_clean_scroll is -1 (auto), start at the top
-    GRect start_frame;
-    if (s_clean_scroll == -1) {
-      start_frame = GRect(4, 0, 136, 4000);
-    } else {
-      start_frame = GRect(4, -s_clean_scroll, 136, 4000);
-    }
-
-    // Animation: scroll upwards (text goes UP, Y becomes more negative)
-    // We want to scroll until the second copy reaches the top
-    GRect finish_frame = start_frame;
-    finish_frame.origin.y -= cycle_H;
-
-    s_claude_scroll_anim = property_animation_create_layer_frame(
-        text_layer_get_layer(s_clean_claude_layer), &start_frame,
-        &finish_frame);
-
-    Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
-    // Speed: 40ms/px
-    animation_set_duration(anim, cycle_H * 40);
-    animation_set_curve(anim, AnimationCurveLinear);
-    // Initial delay if we just started
-    if (s_clean_scroll == -1)
-      animation_set_delay(anim, 2000);
-
-    animation_set_handlers(
-        anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
-    animation_schedule(anim);
-  } else {
-    // Text fits - just show it centered or at top
-    text_layer_set_text(s_clean_claude_layer, s_claude_summary);
-    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
-                    GRect(4, 0, 136, 111));
+  // Start from the END (latest lines) so important part is visible first
+  int start_y = 0;
+  if (single_size.h > 111) {
+    start_y = -(single_size.h - 111);
   }
+  GRect start_frame = GRect(4, start_y, 136, 4000);
+
+  // Animation: scroll upwards (text goes UP, Y becomes more negative)
+  GRect finish_frame = start_frame;
+  finish_frame.origin.y -= cycle_H;
+
+  s_claude_scroll_anim = property_animation_create_layer_frame(
+      text_layer_get_layer(s_clean_claude_layer), &start_frame, &finish_frame);
+
+  Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
+  // Speed: 30ms/px, continuous loop
+  animation_set_duration(anim, cycle_H * 30);
+  animation_set_curve(anim, AnimationCurveLinear);
+  animation_set_handlers(
+      anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
+  animation_schedule(anim);
 }
 
 // Callback when Claude scroll stops - loop infinitely
@@ -680,7 +716,7 @@ static void claude_scroll_stopped(Animation *animation, bool finished,
     property_animation_destroy(s_claude_scroll_anim);
     s_claude_scroll_anim = NULL;
   }
-  if (finished && s_auto_scroll_enabled && s_claude_summary[0]) {
+  if (finished && s_auto_scroll_enabled && s_clean_scroll_src[0]) {
     // Reset s_clean_scroll to current cycle to keep it "locked" if needed,
     // or just restart.
     start_claude_scroll();
@@ -901,12 +937,20 @@ static void fx_update(Layer *layer, GContext *ctx) {
   }
 
   if (s_glitch_frames > 0) {
+    // Hyper-glitch overlay: scanlines + shards
     graphics_context_set_fill_color(ctx, GColorLightGray);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 8; i++) {
       int y = rand() % 168;
-      int x = rand() % 70;
-      int w = 40 + (rand() % 70);
+      int x = rand() % 90;
+      int w = 30 + (rand() % 90);
       graphics_fill_rect(ctx, GRect(x, y, w, 2), 0, GCornerNone);
+    }
+
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    for (int i = 0; i < 3; i++) {
+      int y = rand() % 168;
+      int h = 4 + (rand() % 6);
+      graphics_fill_rect(ctx, GRect(0, y, 144, h), 0, GCornerNone);
     }
   }
 }
@@ -936,8 +980,8 @@ static void trigger_glitch_short() {
 }
 
 static void trigger_glitch_text() {
-  s_glitch_frames = 4;
-  s_flash_frames = 1;
+  s_glitch_frames = 8;
+  s_flash_frames = 2;
   if (!s_fx_timer)
     s_fx_timer = app_timer_register(60, fx_tick, NULL);
 }
@@ -1018,12 +1062,22 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       s_chars_shown = 0;
       s_chars_total = 0;
       strncpy(s_status, "Ready", sizeof(s_status));
+      s_clean_hist_count = 0;
+      s_clean_hist_index = -1;
       layer_mark_dirty(s_canvas);
       return;
     }
 
     // CLEAN:cmd|summary|status|tool|suggestion|activeTask - structured data
     if (strncmp(data, "CLEAN:", 6) == 0) {
+      strncpy(s_prev_clean_cmd, s_user_cmd, sizeof(s_prev_clean_cmd) - 1);
+      s_prev_clean_cmd[sizeof(s_prev_clean_cmd) - 1] = '\0';
+      strncpy(s_prev_clean_summary, s_claude_summary,
+              sizeof(s_prev_clean_summary) - 1);
+      s_prev_clean_summary[sizeof(s_prev_clean_summary) - 1] = '\0';
+      strncpy(s_prev_clean_status, s_status, sizeof(s_prev_clean_status) - 1);
+      s_prev_clean_status[sizeof(s_prev_clean_status) - 1] = '\0';
+
       s_clean_scroll = -1;
       s_user_cmd[0] = s_claude_summary[0] = s_last_tool[0] = s_suggestion[0] =
           s_active_task[0] = '\0';
@@ -1069,7 +1123,6 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         text_layer_set_text(s_clean_claude_layer, s_claude_summary);
         layer_set_hidden(text_layer_get_layer(s_clean_claude_layer),
                          s_claude_summary[0] == '\0');
-        start_claude_scroll();
       }
       if (s_clean_command_layer) {
         text_layer_set_text(s_clean_command_layer, s_last_tool);
@@ -1099,7 +1152,41 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         text_layer_set_background_color(s_clean_status_layer, bg);
       start_status_marquee(); // Robust: always start/restart
     }
-    if (s_clean_claude_layer && s_claude_summary[0]) {
+    bool summary_changed =
+        (strcmp(s_prev_clean_summary, s_claude_summary) != 0);
+    bool cmd_changed = (strcmp(s_prev_clean_cmd, s_user_cmd) != 0);
+    bool done_transition =
+        (strstr(s_prev_clean_status, "Working") ||
+         strstr(s_prev_clean_status, "...")) &&
+        (strstr(s_status, "Done") || strstr(s_status, "Ready") ||
+         strstr(s_status, "Finished"));
+
+    if (cmd_changed && s_user_cmd[0]) {
+      trigger_glitch_short();
+    }
+    if (summary_changed && s_claude_summary[0]) {
+      // Push into history (no auto-scroll)
+      if (s_clean_hist_count < CLEAN_HISTORY_MAX) {
+        strncpy(s_clean_history[s_clean_hist_count], s_claude_summary,
+                sizeof(s_clean_history[0]) - 1);
+        s_clean_history[s_clean_hist_count][sizeof(s_clean_history[0]) - 1] =
+            '\0';
+        s_clean_hist_count++;
+      } else {
+        for (int i = 1; i < CLEAN_HISTORY_MAX; i++) {
+          strncpy(s_clean_history[i - 1], s_clean_history[i],
+                  sizeof(s_clean_history[0]) - 1);
+          s_clean_history[i - 1][sizeof(s_clean_history[0]) - 1] = '\0';
+        }
+        strncpy(s_clean_history[CLEAN_HISTORY_MAX - 1], s_claude_summary,
+                sizeof(s_clean_history[0]) - 1);
+        s_clean_history[CLEAN_HISTORY_MAX - 1]
+            [sizeof(s_clean_history[0]) - 1] = '\0';
+      }
+      s_clean_hist_index = s_clean_hist_count - 1;
+      clean_show_history_index(s_clean_hist_index);
+      trigger_glitch_text();
+    } else if (done_transition) {
       trigger_glitch_text();
     }
     return;
@@ -1281,22 +1368,12 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     trigger_glitch_short();
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: UP = manual scroll up
-    s_auto_scroll_enabled = false;
-    if (s_claude_scroll_anim) {
-      animation_unschedule(
-          property_animation_get_animation(s_claude_scroll_anim));
+    // CLEAN mode: UP = previous history block
+    if (s_clean_hist_count > 0 && s_clean_hist_index > 0) {
+      s_clean_hist_index--;
+      clean_show_history_index(s_clean_hist_index);
+      trigger_glitch_short();
     }
-    if (s_clean_scroll == -1) {
-      GRect f = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
-      s_clean_scroll = -f.origin.y;
-    }
-    s_clean_scroll -= 20;
-    if (s_clean_scroll < 0)
-      s_clean_scroll = 0;
-
-    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
-                    GRect(4, -s_clean_scroll, 136, 4000));
     vibes_short_pulse();
   } else {
     s_auto_scroll = false;
@@ -1351,20 +1428,13 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     trigger_glitch_short();
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: DOWN = manual scroll down
-    s_auto_scroll_enabled = false;
-    if (s_claude_scroll_anim) {
-      animation_unschedule(
-          property_animation_get_animation(s_claude_scroll_anim));
+    // CLEAN mode: DOWN = next history block (or latest)
+    if (s_clean_hist_count > 0 &&
+        s_clean_hist_index < s_clean_hist_count - 1) {
+      s_clean_hist_index++;
+      clean_show_history_index(s_clean_hist_index);
+      trigger_glitch_short();
     }
-    if (s_clean_scroll == -1) {
-      GRect f = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
-      s_clean_scroll = -f.origin.y;
-    }
-    s_clean_scroll += 20; // Scroll down = move text UP (more negative Y)
-
-    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
-                    GRect(4, -s_clean_scroll, 136, 4000));
     vibes_short_pulse();
   } else {
     s_auto_scroll = false;
@@ -1378,9 +1448,12 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
 }
 static void up_long_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_display_mode == MODE_CLEAN) {
-    s_auto_scroll_enabled = true;
-    s_clean_scroll = -1; // Reset to auto
-    start_claude_scroll();
+    // CLEAN mode: jump to latest block
+    if (s_clean_hist_count > 0) {
+      s_clean_hist_index = s_clean_hist_count - 1;
+      clean_show_history_index(s_clean_hist_index);
+      trigger_glitch_short();
+    }
     vibes_double_pulse();
   } else if (s_state == STATE_MENU) {
     send_msg("create");
@@ -1405,7 +1478,11 @@ static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
       layer_set_hidden(text_layer_get_layer(s_clean_command_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
-      start_claude_scroll();
+      // Show latest history entry if present
+      if (s_clean_hist_count > 0) {
+        s_clean_hist_index = s_clean_hist_count - 1;
+        clean_show_history_index(s_clean_hist_index);
+      }
       start_command_marquee();
       start_prompt_marquee();
       update_clean_ui_state();
@@ -1465,7 +1542,7 @@ static void create_clean_layers() {
                                   GColorClear); // Transparent
   text_layer_set_text_color(
       s_clean_claude_layer,
-      GColorVividViolet); // Plus vif et lisible que Purple
+      GColorMagenta); // Brighter violet for readability
   text_layer_set_font(s_clean_claude_layer,
                       fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_overflow_mode(s_clean_claude_layer, GTextOverflowModeWordWrap);

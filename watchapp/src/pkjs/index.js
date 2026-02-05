@@ -1,33 +1,35 @@
 Pebble.addEventListener('ready', function () {
     console.log("VibeCoder ready");
-    var ws = new WebSocket('ws://localhost:8080');
+    var ws = null;
     var sending = false;
-    var pending = null;
 
-    ws.onopen = function () {
-        console.log("Bridge OK");
-        // Request session list on connect
-        ws.send(JSON.stringify({ type: 'list' }));
-    };
+    function connect() {
+        ws = new WebSocket('ws://localhost:8080');
 
-    ws.onclose = function () {
-        console.log("Bridge lost, retry 3s");
-        setTimeout(function () { ws = new WebSocket('ws://localhost:8080'); }, 3000);
-    };
+        ws.onopen = function () {
+            console.log("Bridge OK");
+            // Request session list on connect
+            ws.send(JSON.stringify({ type: 'list' }));
+        };
 
-    ws.onmessage = function (e) {
+        ws.onclose = function () {
+            console.log("Bridge lost, retry 3s");
+            setTimeout(connect, 3000);
+        };
+
+        ws.onmessage = function (e) {
         var msg = JSON.parse(e.data);
         console.log("Bridge msg: " + msg.type);
 
         if (msg.type === 'menu') {
             // Send menu to watch: MENU:session1,session2,...
             var sessions = msg.sessions || [];
-            pending = { "TERMINAL_DATA": "MENU:" + sessions.join(",") };
+            queue.push({ "TERMINAL_DATA": "MENU:" + sessions.join(",") });
             trySend();
         }
         else if (msg.type === 'session_joined' || msg.type === 'session_created') {
             // Send session name to watch
-            pending = { "TERMINAL_DATA": "SESSION:" + msg.name };
+            queue.push({ "TERMINAL_DATA": "SESSION:" + msg.name });
             trySend();
         }
         else if (msg.type === 'output') {
@@ -38,8 +40,25 @@ Pebble.addEventListener('ready', function () {
             // is the safest way to avoid weird squares.
             function cleanEmojis(str) {
                 if (!str) return "";
-                // This regex strips typical emojis and high-range chars
-                return str.replace(/[^\x00-\x7F]/g, " ").replace(/\s+/g, " ").trim();
+                // Replace accents then strip non-ASCII
+                var s = str
+                    .replace(/à|á|â|ä|ã|å/g, "a")
+                    .replace(/À|Á|Â|Ä|Ã|Å/g, "A")
+                    .replace(/ç/g, "c")
+                    .replace(/Ç/g, "C")
+                    .replace(/è|é|ê|ë/g, "e")
+                    .replace(/È|É|Ê|Ë/g, "E")
+                    .replace(/ì|í|î|ï/g, "i")
+                    .replace(/Ì|Í|Î|Ï/g, "I")
+                    .replace(/ñ/g, "n")
+                    .replace(/Ñ/g, "N")
+                    .replace(/ò|ó|ô|ö|õ/g, "o")
+                    .replace(/Ò|Ó|Ô|Ö|Õ/g, "O")
+                    .replace(/ù|ú|û|ü/g, "u")
+                    .replace(/Ù|Ú|Û|Ü/g, "U")
+                    .replace(/ý|ÿ/g, "y")
+                    .replace(/Ý/g, "Y");
+                return s.replace(/[^\x00-\x7F]/g, " ").replace(/\s+/g, " ").trim();
             }
 
             content = cleanEmojis(content);
@@ -78,16 +97,40 @@ Pebble.addEventListener('ready', function () {
             if (msg.cleanData) {
                 var cd = msg.cleanData;
                 // Sanitize: replace pipe chars and strip emojis
-                function sanitize(s) {
-                    return cleanEmojis(s || "").replace(/\|/g, " ");
+                function sanitizePreserveNewlines(s) {
+                    if (!s) return "";
+                    var out = s
+                        .replace(/à|á|â|ä|ã|å/g, "a")
+                        .replace(/À|Á|Â|Ä|Ã|Å/g, "A")
+                        .replace(/ç/g, "c")
+                        .replace(/Ç/g, "C")
+                        .replace(/è|é|ê|ë/g, "e")
+                        .replace(/È|É|Ê|Ë/g, "E")
+                        .replace(/ì|í|î|ï/g, "i")
+                        .replace(/Ì|Í|Î|Ï/g, "I")
+                        .replace(/ñ/g, "n")
+                        .replace(/Ñ/g, "N")
+                        .replace(/ò|ó|ô|ö|õ/g, "o")
+                        .replace(/Ò|Ó|Ô|Ö|Õ/g, "O")
+                        .replace(/ù|ú|û|ü/g, "u")
+                        .replace(/Ù|Ú|Û|Ü/g, "U")
+                        .replace(/ý|ÿ/g, "y")
+                        .replace(/Ý/g, "Y");
+                    // Strip non-ASCII but preserve newlines
+                    out = out.replace(/[^\x00-\x7F\n]/g, "");
+                    // Replace pipes to keep CLEAN split safe
+                    return out.replace(/\|/g, " ");
                 }
                 // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask
-                var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool) + "|" + sanitize(cd.suggestion) + "|" + sanitize(cd.activeTask);
+                var cleanStr = "CLEAN:" + sanitizePreserveNewlines(cd.userCmd) + "|" + sanitizePreserveNewlines(cd.summary) + "|" + sanitizePreserveNewlines(cd.status) + "|" + sanitizePreserveNewlines(cd.lastTool) + "|" + sanitizePreserveNewlines(cd.suggestion) + "|" + sanitizePreserveNewlines(cd.activeTask);
                 queue.push({ "TERMINAL_DATA": cleanStr });
             }
             trySend();
         }
-    };
+        };
+    }
+
+    connect();
 
     var queue = [];
     function trySend() {

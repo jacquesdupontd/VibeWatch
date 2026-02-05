@@ -139,42 +139,93 @@ function extractCleanData(events) {
         }
     }
 
-    // Find most recent tool_use
+    // Status / task from most recent assistant message, progress, or thinking
+    let doneTurn = false;
+    let latestAssistantMsg = null;
+    let latestStopReason = null;
     for (const event of reversedEvents) {
-        if (event.type === 'assistant' && event.message?.content && Array.isArray(event.message.content)) {
-            for (const block of event.message.content) {
-                if (block.type === 'tool_use') {
-                    result.lastTool = formatToolUse(block.name, block.input);
+        if (event.type === 'progress' && event.data?.label) {
+            result.activeTask = event.data.label;
+            result.status = event.data.label;
+            break;
+        }
 
-                    // Check if this tool is still running (no result yet)
+        if (event.type === 'assistant' && event.message?.content && Array.isArray(event.message.content)) {
+            const msg = event.message;
+            latestAssistantMsg = msg;
+            latestStopReason = msg.stop_reason;
+
+            if (msg.stop_reason === 'end_turn' || msg.stop_reason === 'stop_sequence') {
+                result.status = 'Ready';
+                result.activeTask = '';
+                doneTurn = true;
+            }
+
+            for (const block of msg.content) {
+                if (block.type === 'thinking' && block.thinking) {
+                    const match = block.thinking.match(/[·✳✶✽*⏺-]?\s*([A-Z][a-z]+)(\.{3}|…)/);
+                    if (match) {
+                        result.status = match[1] + '...';
+                        result.activeTask = match[1] + '...';
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // Find tool_use ONLY from the latest assistant message
+    if (latestAssistantMsg && Array.isArray(latestAssistantMsg.content)) {
+        for (const block of latestAssistantMsg.content) {
+            if (block.type === 'tool_use') {
+                result.lastTool = formatToolUse(block.name, block.input);
+
+                // Only mark running if the latest stop_reason indicates tool_use or streaming
+                const isRunningTurn = !doneTurn &&
+                    (latestStopReason === 'tool_use' || latestStopReason === null || latestStopReason === undefined);
+
+                if (isRunningTurn) {
                     const hasResult = reversedEvents.some(e =>
                         Array.isArray(e.message?.content) && e.message.content.some(b =>
                             b.type === 'tool_result' && b.tool_use_id === block.id
                         )
                     );
-
                     if (!hasResult) {
                         result.activeTask = getTaskFromTool(block.name, block.input);
                         result.status = 'Working...';
                     }
-
-                    break;
                 }
+                break;
             }
-            if (result.lastTool) break;
         }
+    }
+
+    // If the latest turn is done, clear running task
+    if (doneTurn) {
+        result.activeTask = '';
+        result.status = 'Ready';
     }
 
     // Find most recent user message
     for (const event of reversedEvents) {
-        if (event.type === 'user' && event.message?.content && Array.isArray(event.message.content)) {
-            for (const block of event.message.content) {
-                if (block.type === 'text' && block.text) {
-                    result.userCmd = block.text.trim();
-                    if (result.userCmd.length > 100) {
-                        result.userCmd = result.userCmd.substring(0, 100) + '...';
+        if (event.type === 'user' && event.message?.content) {
+            const content = event.message.content;
+            if (typeof content === 'string') {
+                const text = content.trim();
+                // Skip Claude continuation system summary
+                if (!text.startsWith('This session is being continued from a previous conversation')) {
+                    result.userCmd = text;
+                }
+            } else if (Array.isArray(content)) {
+                for (const block of content) {
+                    if (block.type === 'text' && block.text) {
+                        const text = block.text.trim();
+                        if (!text.startsWith('This session is being continued from a previous conversation')) {
+                            result.userCmd = text;
+                            break;
+                        }
                     }
-                    break;
                 }
             }
             if (result.userCmd) break;
