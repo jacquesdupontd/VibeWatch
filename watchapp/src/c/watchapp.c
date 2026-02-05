@@ -23,6 +23,7 @@ static bool s_auto_scroll_enabled = true;
 
 static char s_buffer[2048];
 static char s_prev_buffer[2048];
+static const char *s_flow_buf = NULL;
 static bool s_has_prompt = false;
 static int s_scroll_offset = 0;
 static int s_total_height = 0;
@@ -69,6 +70,11 @@ static char s_clean_history[CLEAN_HISTORY_MAX][1024];
 static int s_clean_hist_count = 0;
 static int s_clean_hist_index = -1;
 static char s_clean_scroll_src[1024] = "";
+static char s_diff_buffer[2048] = "";
+static int s_diff_chars_shown = 0;
+static int s_diff_chars_total = 0;
+static AppTimer *s_diff_stream_timer = NULL;
+static bool s_show_diff_backdrop = false;
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -242,6 +248,22 @@ static int count_chars() {
   return count;
 }
 
+static int count_chars_buf(const char *buf) {
+  int count = 0;
+  const char *p = buf;
+  while (*p) {
+    const char *nl = strchr(p, '\n');
+    int len = nl ? (int)(nl - p) : (int)strlen(p);
+    if (len > 1)
+      count += len - 1; // skip color code char
+    if (nl)
+      p = nl + 1;
+    else
+      break;
+  }
+  return count;
+}
+
 // Fade colors for streaming edge
 static GColor fade_color(int steps_from_end) {
   if (s_dark_mode) {
@@ -275,9 +297,10 @@ static int flow_pass(GContext *ctx, int screen_w, int screen_h, int max_chars,
   char partial[64];
   bool streaming = (s_chars_shown < s_chars_total);
 
-  char *p = s_buffer;
+  const char *buf = s_flow_buf ? s_flow_buf : s_buffer;
+  const char *p = buf;
   while (*p) {
-    char *nl = strchr(p, '\n');
+    const char *nl = strchr(p, '\n');
     int len = nl ? (int)(nl - p) : (int)strlen(p);
     if (len > 1) {
       GColor base_color = GColorWhite;
@@ -567,6 +590,29 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     // Fill background
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+    // Geek backdrop: show diff stream only when main text is empty/short
+    if (s_show_diff_backdrop && s_diff_buffer[0]) {
+      // Temporarily draw diff buffer using existing text flow
+      const char *saved_flow = s_flow_buf;
+      int saved_total = s_chars_total;
+      int saved_shown = s_chars_shown;
+      int saved_scroll = s_scroll_offset;
+
+      s_flow_buf = s_diff_buffer;
+      s_chars_total = s_diff_chars_total;
+      s_chars_shown = s_diff_chars_shown;
+      s_scroll_offset = 0;
+
+      int w = bounds.size.w - 2;
+      int h = bounds.size.h - 32;
+      flow_pass(ctx, w, h, s_chars_shown, 1);
+
+      s_flow_buf = saved_flow;
+      s_chars_total = saved_total;
+      s_chars_shown = saved_shown;
+      s_scroll_offset = saved_scroll;
+    }
 
     // CLIP BARS - cache le débordement du texte Claude
     graphics_fill_rect(ctx, GRect(0, 111, 144, 17), 0,
@@ -980,8 +1026,8 @@ static void trigger_glitch_short() {
 }
 
 static void trigger_glitch_text() {
-  s_glitch_frames = 8;
-  s_flash_frames = 2;
+  s_glitch_frames = 10;
+  s_flash_frames = 10; // rapid flicker on new text
   if (!s_fx_timer)
     s_fx_timer = app_timer_register(60, fx_tick, NULL);
 }
@@ -1019,6 +1065,24 @@ static void start_streaming() {
   if (s_stream_timer)
     app_timer_cancel(s_stream_timer);
   s_stream_timer = app_timer_register(25, stream_tick, NULL);
+}
+
+static void diff_stream_tick(void *data) {
+  if (s_diff_chars_shown < s_diff_chars_total) {
+    s_diff_chars_shown += 3; // slower, nerdy typing
+    if (s_diff_chars_shown > s_diff_chars_total)
+      s_diff_chars_shown = s_diff_chars_total;
+    layer_mark_dirty(s_canvas);
+    s_diff_stream_timer = app_timer_register(20, diff_stream_tick, NULL);
+  } else {
+    s_diff_stream_timer = NULL;
+  }
+}
+
+static void start_diff_streaming() {
+  if (s_diff_stream_timer)
+    app_timer_cancel(s_diff_stream_timer);
+  s_diff_stream_timer = app_timer_register(20, diff_stream_tick, NULL);
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator,
@@ -1064,6 +1128,10 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       strncpy(s_status, "Ready", sizeof(s_status));
       s_clean_hist_count = 0;
       s_clean_hist_index = -1;
+      s_diff_buffer[0] = '\0';
+      s_diff_chars_shown = 0;
+      s_diff_chars_total = 0;
+      s_show_diff_backdrop = false;
       layer_mark_dirty(s_canvas);
       return;
     }
@@ -1089,7 +1157,7 @@ static void inbox_received_callback(DictionaryIterator *iterator,
 
       char *token;
       char *remainder = clean_buf;
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 7; i++) {
         char *sep = strchr(remainder, '|');
         if (sep) {
           *sep = '\0';
@@ -1113,10 +1181,30 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         else if (i == 5) {
           strncpy(s_active_task, token, sizeof(s_active_task) - 1);
           s_task_running = (s_active_task[0] != '\0');
+        } else if (i == 6) {
+          strncpy(s_diff_buffer, token, sizeof(s_diff_buffer) - 1);
+          s_diff_buffer[sizeof(s_diff_buffer) - 1] = '\0';
         }
 
         if (!remainder)
           break;
+      }
+
+      // Diff streaming setup
+      s_diff_chars_total = count_chars_buf(s_diff_buffer);
+      if (s_diff_chars_total > 0) {
+        s_diff_chars_shown = 0;
+        start_diff_streaming();
+      }
+
+      // Decide when to show diff backdrop (only if main text absent/short)
+      int summary_len = (int)strlen(s_claude_summary);
+      s_show_diff_backdrop = false;
+      if (summary_len == 0 ||
+          strstr(s_claude_summary, "[No active data") ||
+          strstr(s_claude_summary, "[Active]") ||
+          (strstr(s_status, "...") && summary_len < 40)) {
+        s_show_diff_backdrop = true;
       }
 
       if (s_clean_claude_layer) {
@@ -1658,6 +1746,7 @@ static void window_load(Window *window) {
   layer_add_child(wl, text_layer_get_layer(s_prompt_layer));
 
   strncpy(s_buffer, "C> VibeCoder\nWConnecting...", sizeof(s_buffer));
+  s_flow_buf = s_buffer;
   s_chars_total = count_chars();
   s_chars_shown = 0;
   start_streaming();
@@ -1677,6 +1766,8 @@ static void window_unload(Window *window) {
     app_timer_cancel(s_cursor_timer);
   if (s_stream_timer)
     app_timer_cancel(s_stream_timer);
+  if (s_diff_stream_timer)
+    app_timer_cancel(s_diff_stream_timer);
   if (s_fx_timer)
     app_timer_cancel(s_fx_timer);
   destroy_clean_layers();

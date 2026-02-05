@@ -243,6 +243,32 @@ function detectSuggestionFromTmux(raw) {
     return null;
 }
 
+function extractDiffBackdrop(raw) {
+    if (!raw) return '';
+    const cleaned = clean(raw);
+    const lines = cleaned.split('\n');
+    const diffLines = [];
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 120); i--) {
+        const s = lines[i].trim();
+        if (!s) continue;
+        if (/^(\+|\-|\@\@|diff |index |--- |\+\+\+ )/.test(s)) {
+            diffLines.push(s);
+            if (diffLines.length >= 24) break;
+        }
+    }
+    if (diffLines.length === 0) return '';
+    diffLines.reverse();
+    const colored = diffLines.map(l => {
+        let color = 'L';
+        if (l.startsWith('+')) color = 'G';
+        else if (l.startsWith('-')) color = 'R';
+        else if (l.startsWith('@@')) color = 'C';
+        else if (l.startsWith('diff') || l.startsWith('index') || l.startsWith('+++') || l.startsWith('---')) color = 'L';
+        return color + hyphenate(l, LINE_W);
+    });
+    return colored.join('\n');
+}
+
 function extractClaude(raw) {
     const cleaned = clean(raw);
     const lines = cleaned.split('\n');
@@ -1095,6 +1121,10 @@ wss.on('connection', (ws) => {
                             cleanData.suggestion = sug;
                             console.log('[SUGGESTION] Detected:', JSON.stringify(sug));
                         }
+                        const diff = extractDiffBackdrop(raw);
+                        if (diff) {
+                            cleanData.diff = diff;
+                        }
                     } catch (e) { }
 
                 } else {
@@ -1129,6 +1159,9 @@ wss.on('connection', (ws) => {
                         // Detect suggestion
                         const sug = detectSuggestionFromTmux(raw);
                         if (sug) suggestion = sug;
+
+                        const diff = extractDiffBackdrop(raw);
+                        if (diff) cleanData.diff = diff;
                     }
                 }
 
@@ -1150,6 +1183,7 @@ wss.on('connection', (ws) => {
                 cleanData.status = stripAccents(cleanData.status || '');
                 cleanData.activeTask = stripAccents(cleanData.activeTask || '');
                 cleanData.suggestion = stripAccents(cleanData.suggestion || '');
+                cleanData.diff = stripAccents(cleanData.diff || '');
 
                 // Clamp to avoid AppMessage overflow
                 cleanData.summary = clampTextEnd(cleanData.summary, 700);
@@ -1158,6 +1192,7 @@ wss.on('connection', (ws) => {
                 cleanData.status = clampText(cleanData.status, 40);
                 cleanData.activeTask = clampText(cleanData.activeTask, 80);
                 cleanData.suggestion = clampText(cleanData.suggestion, 120);
+                cleanData.diff = clampTextEnd(cleanData.diff, 1600);
 
                 // If status is stuck on Working but no active task/tool, mark Ready
                 if (cleanData.status &&

@@ -121,8 +121,8 @@ Pebble.addEventListener('ready', function () {
                     // Replace pipes to keep CLEAN split safe
                     return out.replace(/\|/g, " ");
                 }
-                // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask
-                var cleanStr = "CLEAN:" + sanitizePreserveNewlines(cd.userCmd) + "|" + sanitizePreserveNewlines(cd.summary) + "|" + sanitizePreserveNewlines(cd.status) + "|" + sanitizePreserveNewlines(cd.lastTool) + "|" + sanitizePreserveNewlines(cd.suggestion) + "|" + sanitizePreserveNewlines(cd.activeTask);
+                // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask|diff
+                var cleanStr = "CLEAN:" + sanitizePreserveNewlines(cd.userCmd) + "|" + sanitizePreserveNewlines(cd.summary) + "|" + sanitizePreserveNewlines(cd.status) + "|" + sanitizePreserveNewlines(cd.lastTool) + "|" + sanitizePreserveNewlines(cd.suggestion) + "|" + sanitizePreserveNewlines(cd.activeTask) + "|" + sanitizePreserveNewlines(cd.diff);
                 queue.push({ "TERMINAL_DATA": cleanStr });
             }
             trySend();
