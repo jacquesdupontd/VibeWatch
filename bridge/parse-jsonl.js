@@ -3,20 +3,49 @@ const fs = require('fs');
 const path = require('path');
 
 // Find the active .jsonl file for a session
+// Find the active .jsonl file for a session
 function findActiveJsonl(sessionName) {
     try {
+        const { execSync } = require('child_process');
         const projectsDir = path.join(require('os').homedir(), '.claude', 'projects');
 
-        // Try to find folder matching session/project
+        // 1. Get the CWD of the tmux session
+        let sessionCwd = '';
+        try {
+            sessionCwd = execSync(
+                `tmux display-message -t "${sessionName}" -p "#{pane_current_path}" 2>/dev/null`,
+                { encoding: 'utf8' }
+            ).trim();
+        } catch (e) {
+            // Session might not exist or be reachable
+        }
+
+        // 2. Construct expected Claude folder name: /path/to/dir -> -path-to-dir
+        let expectedFolder = '';
+        if (sessionCwd) {
+            expectedFolder = sessionCwd.replace(/\//g, '-');
+            // Claude sometimes keeps the leading dash, sometimes not, but usually path starts with / so replacement starts with -
+            // If path is /Users/foo, it becomes -Users-foo. 
+        }
+
         const allFolders = fs.readdirSync(projectsDir);
         let targetFolder = null;
 
-        // Look for folder that matches the session or current directory
-        for (const folder of allFolders) {
-            if (folder.includes('vibecoder') || folder.includes(sessionName)) {
-                targetFolder = folder;
-                break;
+        // 3. High-precision matching (CWD based)
+        if (expectedFolder) {
+            // Exact match (best)
+            targetFolder = allFolders.find(f => f === expectedFolder);
+
+            // If not found, try containing match (often safer if slight path variations)
+            if (!targetFolder) {
+                targetFolder = allFolders.find(f => f.includes(expectedFolder));
             }
+        }
+
+        // 4. Fallback: match session name directly (only if CWD method failed)
+        // STRICTER match: folder must include session name
+        if (!targetFolder && sessionName) {
+            targetFolder = allFolders.find(f => f.toLowerCase().includes(sessionName.toLowerCase()));
         }
 
         if (!targetFolder) return null;
@@ -40,7 +69,7 @@ function findActiveJsonl(sessionName) {
         }
 
         const jsonlPath = path.join(folderPath, newest);
-        console.log('[JSONL] Found transcript:', jsonlPath);
+        console.log(`[JSONL] Resolved session '${sessionName}' -> ${jsonlPath}`);
         return jsonlPath;
     } catch (e) {
         console.error('[JSONL] Error finding file:', e.message);
@@ -94,7 +123,7 @@ function extractCleanData(events) {
 
     // Find ONLY the most recent complete assistant message (not mixed history)
     for (const event of reversedEvents) {
-        if (event.type === 'assistant' && event.message?.content) {
+        if (event.type === 'assistant' && event.message?.content && Array.isArray(event.message.content)) {
             const textBlocks = [];
             for (const block of event.message.content) {
                 if (block.type === 'text' && block.text) {
@@ -112,14 +141,14 @@ function extractCleanData(events) {
 
     // Find most recent tool_use
     for (const event of reversedEvents) {
-        if (event.type === 'assistant' && event.message?.content) {
+        if (event.type === 'assistant' && event.message?.content && Array.isArray(event.message.content)) {
             for (const block of event.message.content) {
                 if (block.type === 'tool_use') {
                     result.lastTool = formatToolUse(block.name, block.input);
 
                     // Check if this tool is still running (no result yet)
                     const hasResult = reversedEvents.some(e =>
-                        e.message?.content?.some(b =>
+                        Array.isArray(e.message?.content) && e.message.content.some(b =>
                             b.type === 'tool_result' && b.tool_use_id === block.id
                         )
                     );
@@ -138,7 +167,7 @@ function extractCleanData(events) {
 
     // Find most recent user message
     for (const event of reversedEvents) {
-        if (event.type === 'user' && event.message?.content) {
+        if (event.type === 'user' && event.message?.content && Array.isArray(event.message.content)) {
             for (const block of event.message.content) {
                 if (block.type === 'text' && block.text) {
                     result.userCmd = block.text.trim();

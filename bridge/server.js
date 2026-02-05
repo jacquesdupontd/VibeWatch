@@ -486,7 +486,7 @@ function extractCleanDataFromTranscript(transcriptPath) {
                     }
                     // Note: stop_reason=null means still streaming, keep looking for final message
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
 
         return { userCmd, summary, status, lastTool };
@@ -710,7 +710,7 @@ function getProjectDir(sessionPath) {
         if (fs.existsSync(projectDir)) {
             return projectDir;
         }
-    } catch (e) {}
+    } catch (e) { }
     return null;
 }
 
@@ -920,7 +920,7 @@ function isStreamJSONOutput(raw) {
                 if (obj.type && ['assistant', 'user', 'human', 'result', 'init'].includes(obj.type)) {
                     jsonCount++;
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
     }
     return jsonCount >= 3;  // At least 3 JSON events = stream-json mode
@@ -982,7 +982,7 @@ wss.on('connection', (ws) => {
                     const events = parseRecentJsonl(jsonlPath, 100);
                     cleanData = extractCleanData(events);
 
-                    // Map to expected format
+                    // Add structured info
                     cleanData = {
                         userCmd: cleanData.userCmd || '',
                         summary: cleanData.claudeText || '',
@@ -991,22 +991,18 @@ wss.on('connection', (ws) => {
                         activeTask: cleanData.activeTask || ''
                     };
 
-                    // ALSO capture terminal for suggestions ONLY (not in .jsonl)
-                    // NOTE: We DON'T capture live typing - it causes animation bugs
-                    // Prompt will appear after Enter (from .jsonl)
+                    // Capture terminal for suggestions AND interactive prompts
                     try {
                         const raw = execSync(
                             `tmux capture-pane -t "${activeSession}" -p -e -S -50 2>/dev/null`,
                             { encoding: 'utf8', timeout: 1000 }
                         );
 
-                        // Extract suggestion ONLY (dim text after ❯)
+                        // 1. Detect dynamic suggestions (ghost text)
                         const rawLines = raw.split('\n');
                         for (let i = rawLines.length - 1; i >= 0; i--) {
                             const rl = rawLines[i];
                             if (!rl.includes('❯') && !rl.includes('>')) continue;
-
-                            // Check for dim text = suggestion
                             if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
                                 let sugText = rl.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
                                 if (sugText.startsWith('> ')) sugText = sugText.substring(2).trim();
@@ -1018,9 +1014,15 @@ wss.on('connection', (ws) => {
                             }
                             break;
                         }
-                    } catch (e) {
-                        // Ignore tmux errors
-                    }
+
+                        // 2. Detect interactive prompts (Yes/No)
+                        const prompt = detectPrompt(raw);
+                        if (prompt) {
+                            cleanData.prompt = prompt;
+                            console.log('[PROMPT] Detected:', JSON.stringify(prompt));
+                        }
+                    } catch (e) { }
+
                 } else {
                     // FALLBACK: Use tmux capture if .jsonl not found
                     console.log('[JSONL] Fallback to tmux capture');
@@ -1029,46 +1031,28 @@ wss.on('connection', (ws) => {
                         { encoding: 'utf8', timeout: 2000 }
                     );
 
-                    // Check if output is stream-json format
                     const isStreamJSON = isStreamJSONOutput(raw);
-
                     if (isStreamJSON) {
                         cleanData = parseStreamJSON(raw);
-                        if (cleanData.suggestion) {
-                            suggestion = cleanData.suggestion;
-                        }
+                        if (cleanData.suggestion) suggestion = cleanData.suggestion;
                     } else {
-                        const transcriptPath = findTranscriptFile(activeSession);
-                        if (transcriptPath) {
-                            cleanData = extractCleanDataFromTranscript(transcriptPath);
-                        } else {
-                            cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '' };
-                        }
+                        // Regular Claude session with no JSONL yet (or other session)
+                        cleanData = { userCmd: '', summary: '', status: 'Ready', lastTool: '', activeTask: '' };
+
+                        const realtimeText = extractRealtimeText(raw);
+                        if (realtimeText) cleanData.summary = realtimeText;
 
                         const realtimeStatus = extractRealtimeStatus(raw);
-                        if (realtimeStatus) {
-                            cleanData.status = realtimeStatus;
-                        }
+                        if (realtimeStatus) cleanData.status = realtimeStatus;
 
                         const realtimeTool = extractRealtimeTool(raw);
-                        if (realtimeTool) {
-                            cleanData.lastTool = realtimeTool;
-                        }
+                        if (realtimeTool) cleanData.lastTool = realtimeTool;
 
-                        const sessionCwd = getSessionCwd(activeSession);
-                        if (sessionCwd) {
-                            const jsonlText = extractTextFromJSONL(sessionCwd);
-                            if (jsonlText) {
-                                cleanData.summary = jsonlText;
-                            }
-                        }
-                        if (!cleanData.summary || cleanData.summary.length < 20) {
-                            const realtimeText = extractRealtimeText(raw);
-                            if (realtimeText) {
-                                cleanData.summary = realtimeText;
-                            }
-                        }
+                        // Detect prompt
+                        const prompt = detectPrompt(raw);
+                        if (prompt) cleanData.prompt = prompt;
 
+                        // Detect suggestion
                         const rawLines = raw.split('\n');
                         for (let i = rawLines.length - 1; i >= 0; i--) {
                             const rl = rawLines[i];
@@ -1083,32 +1067,33 @@ wss.on('connection', (ws) => {
                     }
                 }
 
-                // Build message for watch - support BOTH verbose and clean modes
-                // For verbose mode: send summary as raw screen content
-                let screen = cleanData.summary || '';
-                const promptType = null;
-
-                const msg = { type: 'output', content: screen };
-                if (promptType) msg.prompt = promptType;
-                if (suggestion) msg.suggestion = suggestion;
-
-                // Add suggestion to cleanData for CLEAN mode
-                if (suggestion) {
-                    cleanData.suggestion = suggestion;
+                // 1. Ensure we have a summary to avoid black screen
+                if (!cleanData.summary) {
+                    if (cleanData.lastTool) {
+                        cleanData.summary = `[Active] Tool: ${cleanData.lastTool}`;
+                    } else if (cleanData.status && cleanData.status !== 'Ready') {
+                        cleanData.summary = `[${cleanData.status}]...`;
+                    } else {
+                        cleanData.summary = "[No active data in this session]";
+                    }
                 }
 
-                // Debug: log cleanData
-                console.log('CLEAN:', JSON.stringify(cleanData).substring(0, 150));
-
-                if (cleanData) msg.cleanData = cleanData;
+                const msg = { type: 'output', content: cleanData.summary, cleanData };
+                if (suggestion) msg.suggestion = suggestion;
+                if (cleanData.prompt) msg.prompt = cleanData.prompt;
 
                 const msgStr = JSON.stringify(msg);
-                // Send if cleanData has content OR if screen has content (stream-json may have no screen)
-                if (msgStr !== lastSent && (screen.length > 0 || cleanData.summary)) {
-                    if (ws.readyState === WebSocket.OPEN) ws.send(msgStr);
+                // ALWAYS send if msg has changed
+                if (msgStr !== lastSent) {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(msgStr);
+                        console.log(`[BRIDGE] Sent update for '${activeSession}' (${cleanData.summary.substring(0, 30)}...)`);
+                    }
                     lastSent = msgStr;
                 }
-            } catch { }
+            } catch (e) {
+                console.error('[POLL ERROR]', e.message);
+            }
         }, POLL_MS);
     }
 

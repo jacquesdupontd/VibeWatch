@@ -5,15 +5,18 @@ static Layer *s_canvas;
 static TextLayer *s_prompt_layer;
 
 // CLEAN mode TextLayers for PropertyAnimation
-static Layer *s_clean_clip_layer = NULL;  // CLIPPING container pour Claude text
+static Layer *s_clean_clip_layer = NULL; // CLIPPING container pour Claude text
 static TextLayer *s_clean_claude_layer = NULL;
 static TextLayer *s_clean_command_layer = NULL;
 static TextLayer *s_clean_prompt_layer = NULL;
 static TextLayer *s_clean_status_layer = NULL;
 static PropertyAnimation *s_claude_scroll_anim = NULL;
-static PropertyAnimation *s_command_marquee_anim = NULL;  // Horizontal marquee for command
-static PropertyAnimation *s_prompt_marquee_anim = NULL;   // Horizontal marquee for prompt
-static PropertyAnimation *s_status_marquee_anim = NULL;   // Horizontal marquee for status/task
+static PropertyAnimation *s_command_marquee_anim =
+    NULL; // Horizontal marquee for command
+static PropertyAnimation *s_prompt_marquee_anim =
+    NULL; // Horizontal marquee for prompt
+static PropertyAnimation *s_status_marquee_anim =
+    NULL; // Horizontal marquee for status/task
 static bool s_auto_scroll_enabled = true;
 
 static char s_buffer[2048];
@@ -38,19 +41,21 @@ static char s_active_session[32] = "";
 typedef enum { MODE_VERBOSE, MODE_CLEAN } DisplayMode;
 static DisplayMode s_display_mode = MODE_VERBOSE;
 static char s_user_cmd[128] = "";
-static char s_claude_summary[1024] = "";  // Larger buffer for multiple paragraphs
+static char s_claude_summary[1024] =
+    ""; // Larger buffer for multiple paragraphs
 static char s_status[32] = "Ready";
-static char s_last_tool[256] = "";  // Increased for long commands
+static char s_last_tool[256] = "";   // Increased for long commands
 static char s_suggestion[128] = "";  // Ghost text suggestion
-static char s_active_task[128] = "";  // Increased for long task names
+static char s_active_task[128] = ""; // Increased for long task names
 static bool s_task_running = false;  // Is a task currently running?
 
-// Marquee duplicate buffers for seamless infinite scroll (2 full copies + separator)
+// Marquee duplicate buffers for seamless infinite scroll (2 full copies +
+// separator)
 static char s_command_marquee_buf[600] = "";
 static char s_prompt_marquee_buf[600] = "";
 static char s_status_marquee_buf[600] = "";
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
-static int s_marquee_offset = 0;  // For horizontal marquee (commands)
+static int s_marquee_offset = 0; // For horizontal marquee (commands)
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -361,178 +366,41 @@ done:
   return y + s_line_h + ((mode > 0) ? s_scroll_offset : 4);
 }
 
-static void draw_clean_mode(GContext *ctx, GRect bounds) {
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+// Helper to update CLEAN mode UI state (colors, text) without full redraw
+static void update_clean_ui_state() {
+  if (s_display_mode != MODE_CLEAN || !s_clean_status_layer)
+    return;
 
-  GFont body = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-  GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-
-  // LAYOUT (bottom to top):
-  // 1. Status bar (18px) - bottom
-  // 2. Prompt/Suggestion (16px) - just above status
-  // --- separator line ---
-  // 3. Last tool (16px) - ABOVE the line
-  // 4. Claude text (rest) - top
-
-  int status_h = 18;
-  int prompt_h = 16;
-  int tool_h = s_last_tool[0] ? 16 : 0;
-  int below_line = status_h + prompt_h;  // Below separator
-  int above_line = tool_h;               // Above separator
-
-  // Content zone for Claude text (everything above the tool line)
-  int content_h = bounds.size.h - below_line - above_line - 4;
-  if (content_h < 20) content_h = 20;  // Safety minimum
-  int content_w = bounds.size.w - 8;
-  if (content_w < 50) content_w = 50;  // Safety minimum
-
-  // ===== 1. Draw Claude text (violet) - with UP/DOWN scroll =====
-  if (s_claude_summary[0]) {
-    int len = strlen(s_claude_summary);
-    const char *text_to_show = s_claude_summary;
-
-    // Scroll handling: s_clean_scroll = char offset from start
-    // -1 = auto (show end), >=0 = manual scroll position
-    if (s_clean_scroll < 0) {
-      // Auto mode: show END
-      if (len > 150) {
-        int start = len - 150;
-        while (start > 0 && s_claude_summary[start] != ' ') start--;
-        if (s_claude_summary[start] == ' ') start++;
-        text_to_show = s_claude_summary + start;
-      }
-    } else {
-      // Manual scroll mode
-      int start = s_clean_scroll;
-      if (start >= len) start = len > 150 ? len - 150 : 0;
-      if (start > 0) {
-        while (start > 0 && s_claude_summary[start] != ' ') start--;
-        if (s_claude_summary[start] == ' ') start++;
-      }
-      text_to_show = s_claude_summary + start;
-    }
-
-    graphics_context_set_text_color(ctx, GColorPurple);  // Violet comme l'IA
-    graphics_draw_text(ctx, text_to_show, body,
-        GRect(4, 2, content_w, content_h),
-        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-  }
-
-  // ===== 2. Last tool (cyan) - ABOVE separator line, with MARQUEE =====
-  int tool_y = content_h;
-
-  // Black bar to hide scrolling text underneath tool area
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(0, tool_y - 2, bounds.size.w, tool_h + 8), 0, GCornerNone);
-
-  if (s_last_tool[0]) {
-    static char tool_buf[48];
-    int tool_len = strlen(s_last_tool);
-    const char *tool_text = s_last_tool;
-
-    // Marquee scroll if too long
-    if (tool_len > 28) {
-      int scroll_pos = (s_marquee_offset / 2) % (tool_len + 4);  // Slower scroll
-      if (scroll_pos < tool_len) {
-        int show_len = tool_len - scroll_pos;
-        if (show_len > 35) show_len = 35;
-        strncpy(tool_buf, s_last_tool + scroll_pos, show_len);
-        tool_buf[show_len] = '\0';
-      } else {
-        strncpy(tool_buf, s_last_tool, 35);
-        tool_buf[35] = '\0';
-      }
-      tool_text = tool_buf;
-    }
-
-    graphics_context_set_text_color(ctx, GColorCyan);
-    graphics_draw_text(ctx, tool_text, small,
-        GRect(4, tool_y, bounds.size.w - 8, tool_h),
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
-
-  // ===== Separator line (below tool, above prompt) =====
-  int line_y = content_h + tool_h + 2;
-  graphics_context_set_stroke_color(ctx, GColorDarkGray);
-  graphics_draw_line(ctx, GPoint(10, line_y), GPoint(bounds.size.w - 10, line_y));
-
-  // ===== 3. Prompt OR Suggestion (yellow) - BELOW line, ABOVE status =====
-  int prompt_y = line_y - 1;  // Remonté de 3px pour meilleur espacement
   bool has_suggestion = (s_suggestion[0] != '\0');
-  static char prompt_buf[48];
-
-  if (has_suggestion) {
-    // SUGGESTION: Blinking + Marquee scroll
-    int sug_len = strlen(s_suggestion);
-
-    // Marquee: scroll if text is longer than visible area (~30 chars)
-    const char *scroll_text = s_suggestion;
-    if (sug_len > 30) {
-      int scroll_pos = s_marquee_offset % (sug_len + 5);
-      if (scroll_pos < sug_len) {
-        int show_len = sug_len - scroll_pos;
-        if (show_len > 35) show_len = 35;
-        strncpy(prompt_buf, s_suggestion + scroll_pos, show_len);
-        prompt_buf[show_len] = '\0';
-      } else {
-        strncpy(prompt_buf, s_suggestion, 35);
-        prompt_buf[35] = '\0';
-      }
-      scroll_text = prompt_buf;
-    }
-
-    // Blink: alternate yellow/dim
-    if (s_cursor_visible) {
-      graphics_context_set_text_color(ctx, GColorYellow);
-    } else {
-      graphics_context_set_text_color(ctx, GColorLightGray);
-    }
-    graphics_draw_text(ctx, scroll_text, small,
-        GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  } else if (s_user_cmd[0]) {
-    // User prompt: WHITE text - show END if too long (like typing feedback)
-    graphics_context_set_text_color(ctx, GColorWhite);  // Blanc pour le prompt user
-    int cmd_len = strlen(s_user_cmd);
-    const char *display_text = s_user_cmd;
-
-    // If text is too long, show the END (what user just typed)
-    if (cmd_len > 35) {
-      // Show last ~35 chars to always see the end
-      display_text = s_user_cmd + cmd_len - 35;
-    }
-
-    graphics_draw_text(ctx, display_text, small,
-        GRect(4, prompt_y, bounds.size.w - 8, prompt_h),
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
-
-  // Status bar (colored based on status)
-  int status_y = bounds.size.h - status_h;
   GColor status_bg = GColorDarkGray;
   GColor status_fg = GColorWhite;
   const char *status_text = s_status;
 
-  // Priority: suggestion > active task > thinking > done/error
-  if (has_suggestion) {
-    status_bg = GColorCobaltBlue;
-    status_fg = GColorWhite;
-    status_text = "SEL = accept";
-  } else if (s_task_running && s_active_task[0]) {
-    // TASK RUNNING: GLOW effect (pulse between bright and dim purple)
-    if (s_cursor_visible) {
-      status_bg = GColorPurple;  // Bright
-    } else {
-      status_bg = GColorImperialPurple;  // Dim
-    }
-    status_fg = GColorWhite;
-    status_text = s_active_task;  // Show task name
-  } else if (strstr(s_status, "...") || strstr(s_status, "Working")) {
-    // Thinking words (Harmonizing..., etc.) - orange
+  // Priority: Interactive Questions (Yes/No) > Suggestion > Active Task >
+  // Thinking > Done/Error
+  if (s_has_prompt) {
     status_bg = GColorOrange;
     status_fg = GColorBlack;
-  } else if (strstr(s_status, "Done") || strstr(s_status, "Ready")) {
+    status_text = s_prompt_text;
+  } else if (strncmp(s_status, "QUESTION:", 9) == 0) {
+    status_bg = GColorOrange;
+    status_fg = GColorBlack;
+    status_text = s_status + 9;
+  } else if (has_suggestion) {
+    status_bg = GColorCobaltBlue;
+    status_fg = GColorWhite;
+    status_text = "PRESS SELECT TO ACCEPT";
+  } else if (s_task_running && s_active_task[0]) {
+    status_bg = s_cursor_visible ? GColorPurple : GColorImperialPurple;
+    status_fg = GColorWhite;
+    status_text = s_active_task;
+  } else if (strstr(s_status, "...") || strstr(s_status, "working") ||
+             strstr(s_status, "Working")) {
+    status_bg = s_cursor_visible ? GColorWindsorTan : GColorOrange;
+    status_fg = GColorBlack;
+    status_text = s_status;
+  } else if (strstr(s_status, "Done") || strstr(s_status, "Ready") ||
+             strstr(s_status, "Finished")) {
     status_bg = GColorIslamicGreen;
     status_fg = GColorWhite;
   } else if (strstr(s_status, "Error") || strstr(s_status, "Failed")) {
@@ -540,18 +408,22 @@ static void draw_clean_mode(GContext *ctx, GRect bounds) {
     status_fg = GColorWhite;
   }
 
-  graphics_context_set_fill_color(ctx, status_bg);
-  graphics_fill_rect(ctx, GRect(0, status_y, bounds.size.w, status_h), 0, GCornerNone);
-  graphics_context_set_text_color(ctx, status_fg);
-  graphics_draw_text(ctx, status_text, small,
-      GRect(4, status_y, bounds.size.w - 8, status_h),
-      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  text_layer_set_background_color(s_clean_status_layer, status_bg);
+  text_layer_set_text_color(s_clean_status_layer, status_fg);
 
-  // Mode indicator
-  graphics_context_set_text_color(ctx, GColorDarkGray);
-  graphics_draw_text(ctx, "CLEAN", fonts_get_system_font(FONT_KEY_GOTHIC_09),
-      GRect(bounds.size.w - 30, 0, 28, 10),
-      GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+  // Update text ONLY if not in marquee (marquee handles its own text)
+  if (!s_status_marquee_anim) {
+    text_layer_set_text(s_clean_status_layer, status_text);
+  }
+
+  // Also blink the prompt if it's a suggestion
+  if (has_suggestion && s_clean_prompt_layer) {
+    text_layer_set_text_color(s_clean_prompt_layer, s_cursor_visible
+                                                        ? GColorYellow
+                                                        : GColorLightGray);
+  } else if (s_clean_prompt_layer) {
+    text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+  }
 }
 
 static void draw_menu(GContext *ctx, GRect bounds) {
@@ -564,14 +436,16 @@ static void draw_menu(GContext *ctx, GRect bounds) {
 
   // Title
   graphics_context_set_text_color(ctx, GColorCyan);
-  graphics_draw_text(ctx, "VibeCoder", font,
-      GRect(0, y, bounds.size.w, 22), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_draw_text(ctx, "VibeCoder", font, GRect(0, y, bounds.size.w, 22),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter,
+                     NULL);
   y += 24;
 
   // Hint
   graphics_context_set_text_color(ctx, GColorDarkGray);
-  graphics_draw_text(ctx, "UP/DN nav | SEL join", small,
-      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_draw_text(
+      ctx, "UP/DN nav | SEL join", small, GRect(2, y, bounds.size.w - 4, 14),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   y += 16;
 
   // Sessions
@@ -579,30 +453,35 @@ static void draw_menu(GContext *ctx, GRect bounds) {
     for (int i = 0; i < s_session_count && i < 5; i++) {
       if (i == s_selected_idx) {
         graphics_context_set_fill_color(ctx, GColorDarkGray);
-        graphics_fill_rect(ctx, GRect(2, y, bounds.size.w - 4, 18), 0, GCornerNone);
+        graphics_fill_rect(ctx, GRect(2, y, bounds.size.w - 4, 18), 0,
+                           GCornerNone);
         graphics_context_set_text_color(ctx, GColorWhite);
       } else {
         graphics_context_set_text_color(ctx, GColorLightGray);
       }
-      graphics_draw_text(ctx, s_sessions[i], small,
-          GRect(8, y, bounds.size.w - 16, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      graphics_draw_text(
+          ctx, s_sessions[i], small, GRect(8, y, bounds.size.w - 16, 18),
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       y += 18;
     }
   } else {
     graphics_context_set_text_color(ctx, GColorDarkGray);
-    graphics_draw_text(ctx, "No sessions", small,
-        GRect(4, y, bounds.size.w - 8, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    graphics_draw_text(
+        ctx, "No sessions", small, GRect(4, y, bounds.size.w - 8, 18),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 
   // Bottom hints
   y = bounds.size.h - 32;
   graphics_context_set_text_color(ctx, GColorMintGreen);
-  graphics_draw_text(ctx, "Long UP = New session", small,
-      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_draw_text(
+      ctx, "Long UP = New session", small, GRect(2, y, bounds.size.w - 4, 14),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   y += 14;
   graphics_context_set_text_color(ctx, GColorIcterine);
-  graphics_draw_text(ctx, "Long DN = Refresh", small,
-      GRect(2, y, bounds.size.w - 4, 14), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_draw_text(
+      ctx, "Long DN = Refresh", small, GRect(2, y, bounds.size.w - 4, 14),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
 static void canvas_update(Layer *layer, GContext *ctx) {
@@ -621,8 +500,10 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
     // CLIP BARS - cache le débordement du texte Claude
-    graphics_fill_rect(ctx, GRect(0, 111, 144, 17), 0, GCornerNone);  // Bar au-dessus command
-    graphics_fill_rect(ctx, GRect(0, 145, 144, 5), 0, GCornerNone);   // Bar au-dessus status
+    graphics_fill_rect(ctx, GRect(0, 111, 144, 17), 0,
+                       GCornerNone); // Bar au-dessus command
+    graphics_fill_rect(ctx, GRect(0, 145, 144, 5), 0,
+                       GCornerNone); // Bar au-dessus status
 
     // SEPARATOR LINE
     graphics_context_set_stroke_color(ctx, GColorDarkGray);
@@ -631,7 +512,8 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     // Show CLEAN layers
     if (s_clean_clip_layer) {
       layer_set_hidden(s_clean_clip_layer, false);
-      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), false);  // SHOW Claude text!
+      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer),
+                       false); // SHOW Claude text!
       layer_set_hidden(text_layer_get_layer(s_clean_command_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
       layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
@@ -708,22 +590,25 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 }
 
 // PropertyAnimation stopped callback - loop the scroll
-static void claude_scroll_stopped(Animation *animation, bool finished, void *context) {
+static void claude_scroll_stopped(Animation *animation, bool finished,
+                                  void *context) {
   if (s_claude_scroll_anim) {
     property_animation_destroy(s_claude_scroll_anim);
     s_claude_scroll_anim = NULL;
   }
 
   // Restart if still in CLEAN mode and auto-scroll enabled
-  if (finished && s_display_mode == MODE_CLEAN && s_auto_scroll_enabled && s_clean_claude_layer) {
+  if (finished && s_display_mode == MODE_CLEAN && s_auto_scroll_enabled &&
+      s_clean_claude_layer) {
     // Get current layer position
     GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
 
     // Calculate text height
     GSize content_size = text_layer_get_content_size(s_clean_claude_layer);
-    int scroll_range = content_size.h - 111;  // 111px visible area (pixel perfect)
+    int scroll_range =
+        content_size.h - 111; // 111px visible area (pixel perfect)
 
-    if (scroll_range > 20) {  // Only animate if there's enough to scroll
+    if (scroll_range > 20) { // Only animate if there's enough to scroll
       // Toggle direction: if at top, go down; if at bottom, go up
       GRect start, finish;
       if (frame.origin.y >= 0) {
@@ -737,15 +622,15 @@ static void claude_scroll_stopped(Animation *animation, bool finished, void *con
       }
 
       s_claude_scroll_anim = property_animation_create_layer_frame(
-        text_layer_get_layer(s_clean_claude_layer), &start, &finish);
+          text_layer_get_layer(s_clean_claude_layer), &start, &finish);
 
       Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
-      animation_set_duration(anim, scroll_range * 20);  // 20ms per pixel = plus rapide
+      animation_set_duration(anim,
+                             scroll_range * 20); // 20ms per pixel = plus rapide
       animation_set_curve(anim, AnimationCurveLinear);
-      animation_set_delay(anim, 1000);  // 1s pause before next scroll
-      animation_set_handlers(anim, (AnimationHandlers){
-        .stopped = claude_scroll_stopped
-      }, NULL);
+      animation_set_delay(anim, 1000); // 1s pause before next scroll
+      animation_set_handlers(
+          anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
       animation_schedule(anim);
     }
   }
@@ -753,11 +638,13 @@ static void claude_scroll_stopped(Animation *animation, bool finished, void *con
 
 // Start smooth scroll animation for Claude text
 static void start_claude_scroll() {
-  if (!s_clean_claude_layer || !s_auto_scroll_enabled) return;
+  if (!s_clean_claude_layer || !s_auto_scroll_enabled)
+    return;
 
   // Stop existing animation
   if (s_claude_scroll_anim) {
-    animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_claude_scroll_anim));
     property_animation_destroy(s_claude_scroll_anim);
     s_claude_scroll_anim = NULL;
   }
@@ -771,59 +658,66 @@ static void start_claude_scroll() {
     GRect finish = GRect(4, -scroll_range, 136, 2000);
 
     s_claude_scroll_anim = property_animation_create_layer_frame(
-      text_layer_get_layer(s_clean_claude_layer), &start, &finish);
+        text_layer_get_layer(s_clean_claude_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
-    animation_set_duration(anim, scroll_range * 20);  // 20ms/px = plus rapide
+    animation_set_duration(anim, scroll_range * 20); // 20ms/px = plus rapide
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_delay(anim, 2000);  // 2s initial delay to read start
-    animation_set_handlers(anim, (AnimationHandlers){
-      .stopped = claude_scroll_stopped
-    }, NULL);
+    animation_set_delay(anim, 2000); // 2s initial delay to read start
+    animation_set_handlers(
+        anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
     animation_schedule(anim);
   }
 }
 
 // Callback when command marquee animation stops - loop infinitely
-static void command_marquee_stopped(Animation *animation, bool finished, void *context) {
+static void command_marquee_stopped(Animation *animation, bool finished,
+                                    void *context) {
   if (s_command_marquee_anim) {
     property_animation_destroy(s_command_marquee_anim);
     s_command_marquee_anim = NULL;
   }
   // Reset position to start for seamless loop
   if (finished && s_clean_command_layer && s_last_tool[0]) {
-    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 600, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer),
+                    GRect(4, 111, 600, 16));
     start_command_marquee();
   }
 }
 
 // Callback when prompt marquee animation stops - loop infinitely
-static void prompt_marquee_stopped(Animation *animation, bool finished, void *context) {
+static void prompt_marquee_stopped(Animation *animation, bool finished,
+                                   void *context) {
   if (s_prompt_marquee_anim) {
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
   }
   // Reset position to start for seamless loop
   if (finished && s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
-    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 600, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
+                    GRect(4, 129, 600, 16));
     start_prompt_marquee();
   }
 }
 
 // Start horizontal marquee for command layer (cyan)
 static void start_command_marquee() {
-  if (!s_clean_command_layer) return;
+  if (!s_clean_command_layer)
+    return;
 
   // Stop existing animation
   if (s_command_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_command_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_command_marquee_anim));
     property_animation_destroy(s_command_marquee_anim);
     s_command_marquee_anim = NULL;
   }
 
-  if (s_last_tool[0] == '\0') return;
+  if (s_last_tool[0] == '\0')
+    return;
 
-  // Measurement phase: set text to one instance plus separator to get exact width
+  // Measurement phase: set text to one instance plus separator to get exact
+  // width
   static char measure_buf[300];
   snprintf(measure_buf, sizeof(measure_buf), "%s  |  ", s_last_tool);
   text_layer_set_text(s_clean_command_layer, measure_buf);
@@ -832,46 +726,51 @@ static void start_command_marquee() {
 
   if (one_cycle_width > 120) { // Screen is 144px, gothic-14 is tight
     // Preparation phase: fill buffer with two copies for seamlessness
-    snprintf(s_command_marquee_buf, sizeof(s_command_marquee_buf), "%s  |  %s  |  ",
-             s_last_tool, s_last_tool);
+    snprintf(s_command_marquee_buf, sizeof(s_command_marquee_buf),
+             "%s  |  %s  |  ", s_last_tool, s_last_tool);
     text_layer_set_text(s_clean_command_layer, s_command_marquee_buf);
 
     // Ensure layer is wide enough to hold both copies without wrapping
-    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 2000, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer),
+                    GRect(4, 111, 2000, 16));
 
     GRect start = GRect(4, 111, 2000, 16);
     GRect finish = GRect(4 - one_cycle_width, 111, 2000, 16);
 
     s_command_marquee_anim = property_animation_create_layer_frame(
-      text_layer_get_layer(s_clean_command_layer), &start, &finish);
+        text_layer_get_layer(s_clean_command_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_command_marquee_anim);
-    animation_set_duration(anim, one_cycle_width * 30);  // 30ms/px = smooth medical/pharmacy speed
+    animation_set_duration(
+        anim, one_cycle_width * 30); // 30ms/px = smooth medical/pharmacy speed
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_handlers(anim, (AnimationHandlers){
-      .stopped = command_marquee_stopped
-    }, NULL);
+    animation_set_handlers(
+        anim, (AnimationHandlers){.stopped = command_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
     // Text is short - show original
     text_layer_set_text(s_clean_command_layer, s_last_tool);
-    layer_set_frame(text_layer_get_layer(s_clean_command_layer), GRect(4, 111, 136, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_command_layer),
+                    GRect(4, 111, 136, 16));
   }
 }
 
 // Start horizontal marquee for prompt layer (white/yellow)
 static void start_prompt_marquee() {
-  if (!s_clean_prompt_layer) return;
+  if (!s_clean_prompt_layer)
+    return;
 
   // Stop existing animation
   if (s_prompt_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_prompt_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_prompt_marquee_anim));
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
   }
 
   const char *text = s_suggestion[0] ? s_suggestion : s_user_cmd;
-  if (!text || text[0] == '\0') return;
+  if (!text || text[0] == '\0')
+    return;
 
   // Measurement
   static char measure_buf[300];
@@ -881,33 +780,35 @@ static void start_prompt_marquee() {
   int one_cycle_width = single_size.w;
 
   if (one_cycle_width > 120) {
-    snprintf(s_prompt_marquee_buf, sizeof(s_prompt_marquee_buf), "%s  |  %s  |  ",
-             text, text);
+    snprintf(s_prompt_marquee_buf, sizeof(s_prompt_marquee_buf),
+             "%s  |  %s  |  ", text, text);
     text_layer_set_text(s_clean_prompt_layer, s_prompt_marquee_buf);
 
-    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 2000, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
+                    GRect(4, 129, 2000, 16));
 
     GRect start = GRect(4, 129, 2000, 16);
     GRect finish = GRect(4 - one_cycle_width, 129, 2000, 16);
 
     s_prompt_marquee_anim = property_animation_create_layer_frame(
-      text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
+        text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
     animation_set_duration(anim, one_cycle_width * 30);
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_handlers(anim, (AnimationHandlers){
-      .stopped = prompt_marquee_stopped
-    }, NULL);
+    animation_set_handlers(
+        anim, (AnimationHandlers){.stopped = prompt_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
     text_layer_set_text(s_clean_prompt_layer, text);
-    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer), GRect(4, 129, 136, 16));
+    layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
+                    GRect(4, 129, 136, 16));
   }
 }
 
 // Callback when status marquee animation stops - loop infinitely
-static void status_marquee_stopped(Animation *animation, bool finished, void *context) {
+static void status_marquee_stopped(Animation *animation, bool finished,
+                                   void *context) {
   if (s_status_marquee_anim) {
     property_animation_destroy(s_status_marquee_anim);
     s_status_marquee_anim = NULL;
@@ -920,11 +821,13 @@ static void status_marquee_stopped(Animation *animation, bool finished, void *co
 
 // Start horizontal marquee for status layer (active task)
 static void start_status_marquee() {
-  if (!s_clean_status_layer || !s_active_task[0]) return;
+  if (!s_clean_status_layer || !s_active_task[0])
+    return;
 
   // Stop existing animation
   if (s_status_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_status_marquee_anim));
     property_animation_destroy(s_status_marquee_anim);
     s_status_marquee_anim = NULL;
   }
@@ -938,29 +841,30 @@ static void start_status_marquee() {
 
   if (one_cycle_width > 140) {
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentLeft);
-    snprintf(s_status_marquee_buf, sizeof(s_status_marquee_buf), "%s       %s       ",
-             s_active_task, s_active_task);
+    snprintf(s_status_marquee_buf, sizeof(s_status_marquee_buf),
+             "%s       %s       ", s_active_task, s_active_task);
     text_layer_set_text(s_clean_status_layer, s_status_marquee_buf);
 
-    layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 2000, 18));
+    layer_set_frame(text_layer_get_layer(s_clean_status_layer),
+                    GRect(0, 150, 2000, 18));
 
     GRect start = GRect(0, 150, 2000, 18);
     GRect finish = GRect(-one_cycle_width, 150, 2000, 18);
 
     s_status_marquee_anim = property_animation_create_layer_frame(
-      text_layer_get_layer(s_clean_status_layer), &start, &finish);
+        text_layer_get_layer(s_clean_status_layer), &start, &finish);
 
     Animation *anim = property_animation_get_animation(s_status_marquee_anim);
     animation_set_duration(anim, one_cycle_width * 30);
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_handlers(anim, (AnimationHandlers){
-      .stopped = status_marquee_stopped
-    }, NULL);
+    animation_set_handlers(
+        anim, (AnimationHandlers){.stopped = status_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
     text_layer_set_text(s_clean_status_layer, s_active_task);
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
-    layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 144, 18));
+    layer_set_frame(text_layer_get_layer(s_clean_status_layer),
+                    GRect(0, 150, 144, 18));
   }
 }
 
@@ -969,7 +873,12 @@ static void blink_tick(void *data) {
   s_cursor_visible = !s_cursor_visible;
   s_anim_counter++;
   s_marquee_offset++;
-  if (s_anim_counter >= 1000) s_anim_counter = 0;
+  if (s_anim_counter >= 1000)
+    s_anim_counter = 0;
+
+  // Dynamic UI update (blinking status/prompt)
+  update_clean_ui_state();
+
   layer_mark_dirty(s_canvas);
   s_cursor_timer = app_timer_register(250, blink_tick, NULL);
 }
@@ -1009,14 +918,17 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       while (*p && s_session_count < 5) {
         const char *comma = strchr(p, ',');
         int len = comma ? (int)(comma - p) : (int)strlen(p);
-        if (len > 31) len = 31;
+        if (len > 31)
+          len = 31;
         if (len > 0) {
           memcpy(s_sessions[s_session_count], p, len);
           s_sessions[s_session_count][len] = '\0';
           s_session_count++;
         }
-        if (comma) p = comma + 1;
-        else break;
+        if (comma)
+          p = comma + 1;
+        else
+          break;
       }
       s_state = STATE_MENU;
       s_selected_idx = 0;
@@ -1053,21 +965,24 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       const char *sep1 = strchr(p, '|');
       if (sep1) {
         int len = (int)(sep1 - p);
-        if (len > 127) len = 127;
+        if (len > 127)
+          len = 127;
         strncpy(s_user_cmd, p, len);
         s_user_cmd[len] = '\0';
         p = sep1 + 1;
         const char *sep2 = strchr(p, '|');
         if (sep2) {
           len = (int)(sep2 - p);
-          if (len > 1023) len = 1023;
+          if (len > 1023)
+            len = 1023;
           strncpy(s_claude_summary, p, len);
           s_claude_summary[len] = '\0';
           p = sep2 + 1;
           const char *sep3 = strchr(p, '|');
           if (sep3) {
             len = (int)(sep3 - p);
-            if (len > 31) len = 31;
+            if (len > 31)
+              len = 31;
             strncpy(s_status, p, len);
             s_status[len] = '\0';
             p = sep3 + 1;
@@ -1075,7 +990,8 @@ static void inbox_received_callback(DictionaryIterator *iterator,
             const char *sep4 = strchr(p, '|');
             if (sep4) {
               len = (int)(sep4 - p);
-              if (len > 255) len = 255;  // Increased buffer size
+              if (len > 255)
+                len = 255; // Increased buffer size
               strncpy(s_last_tool, p, len);
               s_last_tool[len] = '\0';
               p = sep4 + 1;
@@ -1083,7 +999,8 @@ static void inbox_received_callback(DictionaryIterator *iterator,
               const char *sep5 = strchr(p, '|');
               if (sep5) {
                 len = (int)(sep5 - p);
-                if (len > 127) len = 127;
+                if (len > 127)
+                  len = 127;
                 strncpy(s_suggestion, p, len);
                 s_suggestion[len] = '\0';
                 p = sep5 + 1;
@@ -1104,85 +1021,97 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           } else {
             strncpy(s_status, p, sizeof(s_status) - 1);
             s_status[sizeof(s_status) - 1] = '\0';
+            // Start command marquee if needed
+            if (s_clean_command_layer && s_last_tool[0]) {
+              // ... existing marquee logic
+            }
+
+            // Force immediate UI update
+            update_clean_ui_state();
           }
         }
-      }
 
-      // Update TextLayers with new content
-      if (s_clean_claude_layer) {
-        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
-        // Start smooth scroll animation
-        start_claude_scroll();
-      }
-      // Track last command to avoid restarting marquee on same text
-      static char s_last_command_displayed[256] = "";
-
-      if (s_clean_command_layer) {
-        // Only restart marquee if text actually changed
-        if (strcmp(s_last_tool, s_last_command_displayed) != 0) {
-          strncpy(s_last_command_displayed, s_last_tool, sizeof(s_last_command_displayed) - 1);
-          text_layer_set_text(s_clean_command_layer, s_last_tool);
-          start_command_marquee();
+        // Update TextLayers with new content
+        if (s_clean_claude_layer) {
+          text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+          // Start smooth scroll animation
+          start_claude_scroll();
         }
-      }
-      // Track last prompt to avoid restarting marquee on same text
-      static char s_last_prompt_displayed[256] = "";
-      static bool s_last_was_suggestion = false;
+        // Track last command to avoid restarting marquee on same text
+        static char s_last_command_displayed[256] = "";
 
-      if (s_clean_prompt_layer) {
-        bool is_suggestion = (s_suggestion[0] != '\0');
-        const char *current_text = is_suggestion ? s_suggestion : s_user_cmd;
+        if (s_clean_command_layer) {
+          // Only restart marquee if text actually changed
+          if (strcmp(s_last_tool, s_last_command_displayed) != 0) {
+            strncpy(s_last_command_displayed, s_last_tool,
+                    sizeof(s_last_command_displayed) - 1);
+            text_layer_set_text(s_clean_command_layer, s_last_tool);
+            start_command_marquee();
+          }
+        }
+        // Track last prompt to avoid restarting marquee on same text
+        static char s_last_prompt_displayed[256] = "";
+        static bool s_last_was_suggestion = false;
 
-        // Update if: text changed OR type changed (suggestion <-> user_cmd)
-        bool text_changed = strcmp(current_text, s_last_prompt_displayed) != 0;
-        bool type_changed = (is_suggestion != s_last_was_suggestion);
+        if (s_clean_prompt_layer) {
+          bool is_suggestion = (s_suggestion[0] != '\0');
+          const char *current_text = is_suggestion ? s_suggestion : s_user_cmd;
 
-        if (text_changed || type_changed) {
-          strncpy(s_last_prompt_displayed, current_text, sizeof(s_last_prompt_displayed) - 1);
-          s_last_was_suggestion = is_suggestion;
+          // Update if: text changed OR type changed (suggestion <-> user_cmd)
+          bool text_changed =
+              strcmp(current_text, s_last_prompt_displayed) != 0;
+          bool type_changed = (is_suggestion != s_last_was_suggestion);
 
-          // Always update text and color
-          text_layer_set_text(s_clean_prompt_layer, current_text);
-          if (is_suggestion) {
-            text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
+          if (text_changed || type_changed) {
+            strncpy(s_last_prompt_displayed, current_text,
+                    sizeof(s_last_prompt_displayed) - 1);
+            s_last_was_suggestion = is_suggestion;
+
+            // Always update text and color
+            text_layer_set_text(s_clean_prompt_layer, current_text);
+            if (is_suggestion) {
+              text_layer_set_text_color(s_clean_prompt_layer, GColorYellow);
+            } else {
+              text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+            }
+            start_prompt_marquee();
+          }
+        }
+        if (s_clean_status_layer) {
+          // Set status with appropriate color
+          const char *status_text = s_task_running ? s_active_task : s_status;
+          text_layer_set_text(s_clean_status_layer, status_text);
+
+          if (s_task_running) {
+            text_layer_set_background_color(s_clean_status_layer, GColorPurple);
+            // Start marquee for long tasks
+            if (s_active_task[0]) {
+              start_status_marquee();
+            }
           } else {
-            text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
-          }
-          start_prompt_marquee();
-        }
-      }
-      if (s_clean_status_layer) {
-        // Set status with appropriate color
-        const char *status_text = s_task_running ? s_active_task : s_status;
-        text_layer_set_text(s_clean_status_layer, status_text);
-
-        if (s_task_running) {
-          text_layer_set_background_color(s_clean_status_layer, GColorPurple);
-          // Start marquee for long tasks
-          if (s_active_task[0]) {
-            start_status_marquee();
-          }
-        } else {
-          text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
-          // Reset to centered alignment for short status
-          text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
-          // Reset position - CRITICAL
-          layer_set_frame(text_layer_get_layer(s_clean_status_layer), GRect(0, 150, 144, 18));
-          // Stop any running marquee animation
-          if (s_status_marquee_anim) {
-            animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
-            property_animation_destroy(s_status_marquee_anim);
-            s_status_marquee_anim = NULL;
+            text_layer_set_background_color(s_clean_status_layer,
+                                            GColorDarkGray);
+            // Reset to centered alignment for short status
+            text_layer_set_text_alignment(s_clean_status_layer,
+                                          GTextAlignmentCenter);
+            // Reset position - CRITICAL
+            layer_set_frame(text_layer_get_layer(s_clean_status_layer),
+                            GRect(0, 150, 144, 18));
+            // Stop any running marquee animation
+            if (s_status_marquee_anim) {
+              animation_unschedule(
+                  property_animation_get_animation(s_status_marquee_anim));
+              property_animation_destroy(s_status_marquee_anim);
+              s_status_marquee_anim = NULL;
+            }
           }
         }
       }
-
-      layer_mark_dirty(s_canvas);
-      return;
     }
 
     // Regular output - only in session mode
-    if (s_state != STATE_SESSION) return;
+    if (s_state != STATE_SESSION)
+      return;
 
     memcpy(s_prev_buffer, s_buffer, sizeof(s_prev_buffer));
     strncpy(s_buffer, data, sizeof(s_buffer) - 1);
@@ -1300,14 +1229,24 @@ static void inbox_received_callback(DictionaryIterator *iterator,
                        GRect(0, 0, bounds.size.w, bounds.size.h - 14));
       layer_set_hidden(text_layer_get_layer(s_prompt_layer), false);
       vibes_short_pulse();
+      layer_set_hidden(text_layer_get_layer(s_prompt_layer), false);
+      vibes_short_pulse();
       needs_redraw = true;
     }
+    // Force clean UI update for prompt
+    update_clean_ui_state();
   } else if (s_has_prompt) {
-    s_has_prompt = false;
-    layer_set_frame(s_canvas, GRect(0, 0, bounds.size.w, bounds.size.h));
-    layer_set_bounds(s_canvas, GRect(0, 0, bounds.size.w, bounds.size.h));
-    layer_set_hidden(text_layer_get_layer(s_prompt_layer), true);
-    needs_redraw = true;
+    // Only clear if NOT receiving a CLEAN update (which comes separately)
+    bool is_clean = (t && strncmp(t->value->cstring, "CLEAN:", 6) == 0);
+    if (!is_clean) {
+      s_has_prompt = false;
+      layer_set_frame(s_canvas, GRect(0, 0, bounds.size.w, bounds.size.h));
+      layer_set_bounds(s_canvas, GRect(0, 0, bounds.size.w, bounds.size.h));
+      layer_set_hidden(text_layer_get_layer(s_prompt_layer), true);
+      needs_redraw = true;
+      // Force clean UI update for prompt removal
+      update_clean_ui_state();
+    }
   }
 
   if (needs_redraw)
@@ -1348,14 +1287,16 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     // CLEAN mode: UP = disable auto-scroll and scroll up manually
     s_auto_scroll_enabled = false;
     if (s_claude_scroll_anim) {
-      animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+      animation_unschedule(
+          property_animation_get_animation(s_claude_scroll_anim));
     }
     // Manual scroll up (move layer down)
     if (s_clean_claude_layer) {
       GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
       if (frame.origin.y < 0) {
-        frame.origin.y += 40;  // Scroll up by moving layer down
-        if (frame.origin.y > 0) frame.origin.y = 0;
+        frame.origin.y += 40; // Scroll up by moving layer down
+        if (frame.origin.y > 0)
+          frame.origin.y = 0;
         layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
         vibes_short_pulse();
       }
@@ -1415,16 +1356,18 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     if (s_clean_claude_layer) {
       GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
       GSize content = text_layer_get_content_size(s_clean_claude_layer);
-      int max_y = -(content.h - 111);  // 111px visible area
+      int max_y = -(content.h - 111); // 111px visible area
 
       if (frame.origin.y > max_y + 10) {
         // Can scroll down more
         s_auto_scroll_enabled = false;
         if (s_claude_scroll_anim) {
-          animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+          animation_unschedule(
+              property_animation_get_animation(s_claude_scroll_anim));
         }
-        frame.origin.y -= 40;  // Scroll down by moving layer up
-        if (frame.origin.y < max_y) frame.origin.y = max_y;
+        frame.origin.y -= 40; // Scroll down by moving layer up
+        if (frame.origin.y < max_y)
+          frame.origin.y = max_y;
         layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
         vibes_short_pulse();
       } else {
@@ -1452,7 +1395,8 @@ static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
     vibes_short_pulse();
   } else if (s_state == STATE_SESSION) {
     // Toggle display mode (VERBOSE <-> CLEAN)
-    s_display_mode = (s_display_mode == MODE_VERBOSE) ? MODE_CLEAN : MODE_VERBOSE;
+    s_display_mode =
+        (s_display_mode == MODE_VERBOSE) ? MODE_CLEAN : MODE_VERBOSE;
     vibes_double_pulse();
     layer_mark_dirty(s_canvas);
   }
@@ -1478,7 +1422,8 @@ static void click_config_provider(void *ctx) {
 
 // Create CLEAN mode TextLayers for PropertyAnimation - PIXEL PERFECT
 static void create_clean_layers() {
-  if (s_clean_claude_layer) return;  // Already created
+  if (s_clean_claude_layer)
+    return; // Already created
 
   Layer *root = window_get_root_layer(s_window);
 
@@ -1491,40 +1436,52 @@ static void create_clean_layers() {
 
   // CLIPPING LAYER - 111px pour contenir et clipper le texte Claude
   s_clean_clip_layer = layer_create(GRect(0, 0, 144, 111));
-  layer_set_clips(s_clean_clip_layer, true);  // ACTIVER CLIPPING
+  layer_set_clips(s_clean_clip_layer, true); // ACTIVER CLIPPING
   layer_add_child(root, s_clean_clip_layer);
 
   // Claude text layer - GRANDE (2000px) pour scroll, DANS le clip layer
   s_clean_claude_layer = text_layer_create(GRect(4, 0, 136, 2000));
-  text_layer_set_background_color(s_clean_claude_layer, GColorClear);  // Transparent
-  text_layer_set_text_color(s_clean_claude_layer, GColorVividViolet);  // Plus vif et lisible que Purple
-  text_layer_set_font(s_clean_claude_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_background_color(s_clean_claude_layer,
+                                  GColorClear); // Transparent
+  text_layer_set_text_color(
+      s_clean_claude_layer,
+      GColorVividViolet); // Plus vif et lisible que Purple
+  text_layer_set_font(s_clean_claude_layer,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_overflow_mode(s_clean_claude_layer, GTextOverflowModeWordWrap);
-  layer_add_child(s_clean_clip_layer, text_layer_get_layer(s_clean_claude_layer));
+  layer_add_child(s_clean_clip_layer,
+                  text_layer_get_layer(s_clean_claude_layer));
 
   // Command layer - cyan, 600px large pour marquee scroll
   s_clean_command_layer = text_layer_create(GRect(4, 111, 600, 16));
   text_layer_set_background_color(s_clean_command_layer, GColorBlack);
   text_layer_set_text_color(s_clean_command_layer, GColorCyan);
-  text_layer_set_font(s_clean_command_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_overflow_mode(s_clean_command_layer, GTextOverflowModeFill);  // No ellipsis
+  text_layer_set_font(s_clean_command_layer,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_overflow_mode(s_clean_command_layer,
+                               GTextOverflowModeFill); // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_command_layer));
 
   // Prompt layer - blanc/jaune, 600px pour marquee scroll
   s_clean_prompt_layer = text_layer_create(GRect(4, 129, 600, 16));
   text_layer_set_background_color(s_clean_prompt_layer, GColorBlack);
   text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
-  text_layer_set_font(s_clean_prompt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_overflow_mode(s_clean_prompt_layer, GTextOverflowModeFill);  // No ellipsis
+  text_layer_set_font(s_clean_prompt_layer,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_overflow_mode(s_clean_prompt_layer,
+                               GTextOverflowModeFill); // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_prompt_layer));
 
   // Status layer - 600px large pour marquee infini des tâches
   s_clean_status_layer = text_layer_create(GRect(0, 150, 600, 18));
   text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
   text_layer_set_text_color(s_clean_status_layer, GColorWhite);
-  text_layer_set_font(s_clean_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);  // Center by default
-  text_layer_set_overflow_mode(s_clean_status_layer, GTextOverflowModeFill);  // No ellipsis
+  text_layer_set_font(s_clean_status_layer,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_clean_status_layer,
+                                GTextAlignmentCenter); // Center by default
+  text_layer_set_overflow_mode(s_clean_status_layer,
+                               GTextOverflowModeFill); // No ellipsis
   layer_add_child(root, text_layer_get_layer(s_clean_status_layer));
 
   // Hide all initially
@@ -1538,22 +1495,26 @@ static void create_clean_layers() {
 static void destroy_clean_layers() {
   // Stop animations first
   if (s_claude_scroll_anim) {
-    animation_unschedule(property_animation_get_animation(s_claude_scroll_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_claude_scroll_anim));
     property_animation_destroy(s_claude_scroll_anim);
     s_claude_scroll_anim = NULL;
   }
   if (s_command_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_command_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_command_marquee_anim));
     property_animation_destroy(s_command_marquee_anim);
     s_command_marquee_anim = NULL;
   }
   if (s_prompt_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_prompt_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_prompt_marquee_anim));
     property_animation_destroy(s_prompt_marquee_anim);
     s_prompt_marquee_anim = NULL;
   }
   if (s_status_marquee_anim) {
-    animation_unschedule(property_animation_get_animation(s_status_marquee_anim));
+    animation_unschedule(
+        property_animation_get_animation(s_status_marquee_anim));
     property_animation_destroy(s_status_marquee_anim);
     s_status_marquee_anim = NULL;
   }

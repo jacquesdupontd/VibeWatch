@@ -1,21 +1,21 @@
-Pebble.addEventListener('ready', function() {
+Pebble.addEventListener('ready', function () {
     console.log("VibeCoder ready");
     var ws = new WebSocket('ws://localhost:8080');
     var sending = false;
     var pending = null;
 
-    ws.onopen = function() {
+    ws.onopen = function () {
         console.log("Bridge OK");
         // Request session list on connect
         ws.send(JSON.stringify({ type: 'list' }));
     };
 
-    ws.onclose = function() {
+    ws.onclose = function () {
         console.log("Bridge lost, retry 3s");
-        setTimeout(function() { ws = new WebSocket('ws://localhost:8080'); }, 3000);
+        setTimeout(function () { ws = new WebSocket('ws://localhost:8080'); }, 3000);
     };
 
-    ws.onmessage = function(e) {
+    ws.onmessage = function (e) {
         var msg = JSON.parse(e.data);
         console.log("Bridge msg: " + msg.type);
 
@@ -59,8 +59,7 @@ Pebble.addEventListener('ready', function() {
                 content += "\nS" + msg.suggestion;
                 payload["TERMINAL_DATA"] = content;
             }
-            pending = payload;
-            trySend();
+            queue.push(payload);
 
             // Also send CLEAN data if available
             if (msg.cleanData) {
@@ -71,26 +70,44 @@ Pebble.addEventListener('ready', function() {
                 }
                 // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask
                 var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool) + "|" + sanitize(cd.suggestion) + "|" + sanitize(cd.activeTask);
-                // Send as separate message after a small delay
-                setTimeout(function() {
-                    Pebble.sendAppMessage({ "TERMINAL_DATA": cleanStr }, function(){}, function(){});
-                }, 50);
+                queue.push({ "TERMINAL_DATA": cleanStr });
             }
+            trySend();
         }
     };
 
+    var queue = [];
     function trySend() {
-        if (sending || !pending) return;
-        var payload = pending;
-        pending = null;
+        if (sending || queue.length === 0) return;
+        var payload = queue.shift();
         sending = true;
+
+        // Timeout to avoid permanent lock if callback lost
+        var safetyTimeout = setTimeout(function () {
+            if (sending) {
+                console.log("Msg timeout - resetting queue");
+                sending = false;
+                trySend();
+            }
+        }, 3000);
+
         Pebble.sendAppMessage(payload,
-            function() { sending = false; trySend(); },
-            function(e) { sending = false; setTimeout(trySend, 300); }
+            function () {
+                clearTimeout(safetyTimeout);
+                sending = false;
+                setTimeout(trySend, 20); // Small gap 
+            },
+            function (e) {
+                clearTimeout(safetyTimeout);
+                console.log("Send failed, retrying...");
+                queue.unshift(payload); // Put back
+                sending = false;
+                setTimeout(trySend, 500);
+            }
         );
     }
 
-    Pebble.addEventListener('appmessage', function(e) {
+    Pebble.addEventListener('appmessage', function (e) {
         var key = e.payload["TERMINAL_DATA"];
         if (!key || !ws || ws.readyState !== 1) return;
         console.log("Watch: " + key);
