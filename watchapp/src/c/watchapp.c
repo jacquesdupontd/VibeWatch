@@ -54,6 +54,7 @@ static bool s_task_running = false;  // Is a task currently running?
 static char s_command_marquee_buf[600] = "";
 static char s_prompt_marquee_buf[600] = "";
 static char s_status_marquee_buf[600] = "";
+static char s_claude_marquee_buf[2100] = ""; // 1024 * 2 + small separator
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
 static int s_marquee_offset = 0; // For horizontal marquee (commands)
 
@@ -80,6 +81,9 @@ static int s_page_step = 168;
 static void start_command_marquee();
 static void start_prompt_marquee();
 static void start_status_marquee();
+static void create_clean_layers();
+static void claude_scroll_stopped(Animation *animation, bool finished,
+                                  void *context);
 
 static GColor bg_color() { return s_dark_mode ? GColorBlack : GColorWhite; }
 static GColor cursor_color() { return s_dark_mode ? GColorWhite : GColorBlack; }
@@ -590,53 +594,8 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 }
 
 // PropertyAnimation stopped callback - loop the scroll
-static void claude_scroll_stopped(Animation *animation, bool finished,
-                                  void *context) {
-  if (s_claude_scroll_anim) {
-    property_animation_destroy(s_claude_scroll_anim);
-    s_claude_scroll_anim = NULL;
-  }
 
-  // Restart if still in CLEAN mode and auto-scroll enabled
-  if (finished && s_display_mode == MODE_CLEAN && s_auto_scroll_enabled &&
-      s_clean_claude_layer) {
-    // Get current layer position
-    GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
-
-    // Calculate text height
-    GSize content_size = text_layer_get_content_size(s_clean_claude_layer);
-    int scroll_range =
-        content_size.h - 111; // 111px visible area (pixel perfect)
-
-    if (scroll_range > 20) { // Only animate if there's enough to scroll
-      // Toggle direction: if at top, go down; if at bottom, go up
-      GRect start, finish;
-      if (frame.origin.y >= 0) {
-        // Currently at top, scroll down
-        start = GRect(4, 0, frame.size.w, frame.size.h);
-        finish = GRect(4, -scroll_range, frame.size.w, frame.size.h);
-      } else {
-        // Currently scrolled down, go back to top
-        start = frame;
-        finish = GRect(4, 0, frame.size.w, frame.size.h);
-      }
-
-      s_claude_scroll_anim = property_animation_create_layer_frame(
-          text_layer_get_layer(s_clean_claude_layer), &start, &finish);
-
-      Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
-      animation_set_duration(anim,
-                             scroll_range * 20); // 20ms per pixel = plus rapide
-      animation_set_curve(anim, AnimationCurveLinear);
-      animation_set_delay(anim, 1000); // 1s pause before next scroll
-      animation_set_handlers(
-          anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
-      animation_schedule(anim);
-    }
-  }
-}
-
-// Start smooth scroll animation for Claude text
+// Start smooth scroll animation for Claude text - INFINITE VERTICAL LOOP
 static void start_claude_scroll() {
   if (!s_clean_claude_layer || !s_auto_scroll_enabled)
     return;
@@ -649,24 +608,72 @@ static void start_claude_scroll() {
     s_claude_scroll_anim = NULL;
   }
 
-  // Calculate scroll range - 111px visible area
-  GSize content_size = text_layer_get_content_size(s_clean_claude_layer);
-  int scroll_range = content_size.h - 111;
+  if (s_claude_summary[0] == '\0')
+    return;
 
-  if (scroll_range > 20) {
-    GRect start = GRect(4, 0, 136, 2000);
-    GRect finish = GRect(4, -scroll_range, 136, 2000);
+  // 1. Prepare duplicated buffer for seamless loop
+  // Measure single instance first
+  text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+  GSize single_size = text_layer_get_content_size(s_clean_claude_layer);
+  int H = single_size.h;
+  int gap = 30; // 30px gap/separator
+
+  if (H > 111) { // Visible area is 111px
+    snprintf(s_claude_marquee_buf, sizeof(s_claude_marquee_buf),
+             "%s\n\n- - -\n\n%s", s_claude_summary, s_claude_summary);
+    text_layer_set_text(s_clean_claude_layer, s_claude_marquee_buf);
+
+    int cycle_H = H + gap;
+
+    // Start position: If s_clean_scroll is -1 (auto), start at the END of the
+    // first copy
+    GRect start_frame;
+    if (s_clean_scroll == -1) {
+      start_frame = GRect(4, -(H - 111), 136, 4000);
+    } else {
+      start_frame = GRect(4, -s_clean_scroll, 136, 4000);
+    }
+
+    // Animation: scroll upwards (text goes UP, Y becomes more negative)
+    // We want to scroll from s_clean_scroll UP through the cycle
+    // For infinite loop: scroll by exactly cycle_H
+    GRect finish_frame = start_frame;
+    finish_frame.origin.y -= cycle_H;
 
     s_claude_scroll_anim = property_animation_create_layer_frame(
-        text_layer_get_layer(s_clean_claude_layer), &start, &finish);
+        text_layer_get_layer(s_clean_claude_layer), &start_frame,
+        &finish_frame);
 
     Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
-    animation_set_duration(anim, scroll_range * 20); // 20ms/px = plus rapide
+    // Speed: 40ms/px
+    animation_set_duration(anim, cycle_H * 40);
     animation_set_curve(anim, AnimationCurveLinear);
-    animation_set_delay(anim, 2000); // 2s initial delay to read start
+    // Initial delay if we just started
+    if (s_clean_scroll == -1)
+      animation_set_delay(anim, 2000);
+
     animation_set_handlers(
         anim, (AnimationHandlers){.stopped = claude_scroll_stopped}, NULL);
     animation_schedule(anim);
+  } else {
+    // Text fits - just show it centered or at top
+    text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
+                    GRect(4, 0, 136, 111));
+  }
+}
+
+// Callback when Claude scroll stops - loop infinitely
+static void claude_scroll_stopped(Animation *animation, bool finished,
+                                  void *context) {
+  if (s_claude_scroll_anim) {
+    property_animation_destroy(s_claude_scroll_anim);
+    s_claude_scroll_anim = NULL;
+  }
+  if (finished && s_auto_scroll_enabled && s_claude_summary[0]) {
+    // Reset s_clean_scroll to current cycle to keep it "locked" if needed,
+    // or just restart.
+    start_claude_scroll();
   }
 }
 
@@ -1284,23 +1291,23 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     send_key(s_prompt_keys[0]);
     vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: UP = disable auto-scroll and scroll up manually
+    // CLEAN mode: UP = manual scroll up
     s_auto_scroll_enabled = false;
     if (s_claude_scroll_anim) {
       animation_unschedule(
           property_animation_get_animation(s_claude_scroll_anim));
     }
-    // Manual scroll up (move layer down)
-    if (s_clean_claude_layer) {
-      GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
-      if (frame.origin.y < 0) {
-        frame.origin.y += 40; // Scroll up by moving layer down
-        if (frame.origin.y > 0)
-          frame.origin.y = 0;
-        layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
-        vibes_short_pulse();
-      }
+    if (s_clean_scroll == -1) {
+      GRect f = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
+      s_clean_scroll = -f.origin.y;
     }
+    s_clean_scroll -= 20;
+    if (s_clean_scroll < 0)
+      s_clean_scroll = 0;
+
+    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
+                    GRect(4, -s_clean_scroll, 136, 4000));
+    vibes_short_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset -= s_page_step;
@@ -1350,53 +1357,74 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   }
   if (s_has_prompt) {
     send_key(s_prompt_keys[2]);
-    vibes_double_pulse();
+    vibes_short_pulse();
   } else if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: DOWN = scroll down or re-enable auto-scroll
-    if (s_clean_claude_layer) {
-      GRect frame = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
-      GSize content = text_layer_get_content_size(s_clean_claude_layer);
-      int max_y = -(content.h - 111); // 111px visible area
-
-      if (frame.origin.y > max_y + 10) {
-        // Can scroll down more
-        s_auto_scroll_enabled = false;
-        if (s_claude_scroll_anim) {
-          animation_unschedule(
-              property_animation_get_animation(s_claude_scroll_anim));
-        }
-        frame.origin.y -= 40; // Scroll down by moving layer up
-        if (frame.origin.y < max_y)
-          frame.origin.y = max_y;
-        layer_set_frame(text_layer_get_layer(s_clean_claude_layer), frame);
-        vibes_short_pulse();
-      } else {
-        // At bottom - re-enable auto-scroll
-        s_auto_scroll_enabled = true;
-        start_claude_scroll();
-        vibes_double_pulse();
-      }
+    // CLEAN mode: DOWN = manual scroll down
+    s_auto_scroll_enabled = false;
+    if (s_claude_scroll_anim) {
+      animation_unschedule(
+          property_animation_get_animation(s_claude_scroll_anim));
     }
+    if (s_clean_scroll == -1) {
+      GRect f = layer_get_frame(text_layer_get_layer(s_clean_claude_layer));
+      s_clean_scroll = -f.origin.y;
+    }
+    s_clean_scroll += 20; // Scroll down = move text UP (more negative Y)
+
+    layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
+                    GRect(4, -s_clean_scroll, 136, 4000));
+    vibes_short_pulse();
   } else {
     s_auto_scroll = false;
     s_scroll_offset += s_page_step;
+    if (s_scroll_offset > s_total_height - s_page_step)
+      s_scroll_offset = s_total_height - s_page_step;
+    if (s_scroll_offset < 0)
+      s_scroll_offset = 0;
     layer_mark_dirty(s_canvas);
   }
 }
 static void up_long_handler(ClickRecognizerRef recognizer, void *ctx) {
-  if (s_state == STATE_MENU) {
+  if (s_display_mode == MODE_CLEAN) {
+    s_auto_scroll_enabled = true;
+    s_clean_scroll = -1; // Reset to auto
+    start_claude_scroll();
+    vibes_double_pulse();
+  } else if (s_state == STATE_MENU) {
     send_msg("create");
     vibes_short_pulse();
+  } else {
+    s_dark_mode = !s_dark_mode;
+    layer_mark_dirty(s_canvas);
   }
 }
 static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_state == STATE_MENU) {
     send_msg("list");
     vibes_short_pulse();
-  } else if (s_state == STATE_SESSION) {
+  } else {
     // Toggle display mode (VERBOSE <-> CLEAN)
     s_display_mode =
         (s_display_mode == MODE_VERBOSE) ? MODE_CLEAN : MODE_VERBOSE;
+
+    if (s_display_mode == MODE_CLEAN) {
+      create_clean_layers();
+      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_command_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
+      layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
+      start_claude_scroll();
+      start_command_marquee();
+      start_prompt_marquee();
+      update_clean_ui_state();
+    } else {
+      if (s_clean_claude_layer) {
+        layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), true);
+        layer_set_hidden(text_layer_get_layer(s_clean_command_layer), true);
+        layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), true);
+        layer_set_hidden(text_layer_get_layer(s_clean_status_layer), true);
+      }
+    }
     vibes_double_pulse();
     layer_mark_dirty(s_canvas);
   }

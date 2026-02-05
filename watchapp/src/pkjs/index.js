@@ -32,6 +32,18 @@ Pebble.addEventListener('ready', function () {
         }
         else if (msg.type === 'output') {
             var content = msg.content;
+
+            // Emoji/non-ASCII stripping (Hyper Robust)
+            // Pebble only supports a limited charset. Stripping all non-ASCII 
+            // is the safest way to avoid weird squares.
+            function cleanEmojis(str) {
+                if (!str) return "";
+                // This regex strips typical emojis and high-range chars
+                return str.replace(/[^\x00-\x7F]/g, " ").replace(/\s+/g, " ").trim();
+            }
+
+            content = cleanEmojis(content);
+
             if (content.length > 1900) content = content.substring(content.length - 1900);
             var nl = content.indexOf('\n');
             if (nl >= 0 && nl < 50) content = content.substring(nl + 1);
@@ -56,7 +68,8 @@ Pebble.addEventListener('ready', function () {
             }
 
             if (msg.suggestion) {
-                content += "\nS" + msg.suggestion;
+                var sug = cleanEmojis(msg.suggestion);
+                content += "\nS" + sug;
                 payload["TERMINAL_DATA"] = content;
             }
             queue.push(payload);
@@ -64,9 +77,9 @@ Pebble.addEventListener('ready', function () {
             // Also send CLEAN data if available
             if (msg.cleanData) {
                 var cd = msg.cleanData;
-                // Sanitize: replace pipe chars to avoid breaking the format
+                // Sanitize: replace pipe chars and strip emojis
                 function sanitize(s) {
-                    return (s || "").replace(/\|/g, " ");
+                    return cleanEmojis(s || "").replace(/\|/g, " ");
                 }
                 // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask
                 var cleanStr = "CLEAN:" + sanitize(cd.userCmd) + "|" + sanitize(cd.summary) + "|" + sanitize(cd.status) + "|" + sanitize(cd.lastTool) + "|" + sanitize(cd.suggestion) + "|" + sanitize(cd.activeTask);
