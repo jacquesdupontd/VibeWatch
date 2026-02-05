@@ -225,6 +225,24 @@ function detectPrompt(raw) {
     return null;
 }
 
+function detectSuggestionFromTmux(raw) {
+    if (!raw) return null;
+    const rawLines = raw.split('\n');
+    for (let i = rawLines.length - 1; i >= 0; i--) {
+        const rl = rawLines[i];
+        if (!rl.includes('❯') && !rl.includes('>')) continue;
+        // Claude ghost suggestion is usually dim
+        if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
+            let newSug = clean(rl).trim();
+            if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
+            if (newSug.startsWith('❯ ')) newSug = newSug.substring(2).trim();
+            if (newSug && newSug.length > 2) return newSug;
+        }
+        break;
+    }
+    return null;
+}
+
 function extractClaude(raw) {
     const cleaned = clean(raw);
     const lines = cleaned.split('\n');
@@ -1072,6 +1090,11 @@ wss.on('connection', (ws) => {
                             cleanData.prompt = prompt;
                             console.log('[PROMPT] Detected:', JSON.stringify(prompt));
                         }
+                        const sug = detectSuggestionFromTmux(raw);
+                        if (sug) {
+                            cleanData.suggestion = sug;
+                            console.log('[SUGGESTION] Detected:', JSON.stringify(sug));
+                        }
                     } catch (e) { }
 
                 } else {
@@ -1104,17 +1127,8 @@ wss.on('connection', (ws) => {
                         if (prompt) cleanData.prompt = prompt;
 
                         // Detect suggestion
-                        const rawLines = raw.split('\n');
-                        for (let i = rawLines.length - 1; i >= 0; i--) {
-                            const rl = rawLines[i];
-                            if (!rl.includes('❯') && !rl.includes('>')) continue;
-                            if (rl.includes('\x1b[2m') || rl.includes('\x1b[0;2m')) {
-                                let newSug = clean(rl).trim();
-                                if (newSug.startsWith('> ')) newSug = newSug.substring(2).trim();
-                                if (newSug && newSug.length > 2) suggestion = newSug;
-                            }
-                            break;
-                        }
+                        const sug = detectSuggestionFromTmux(raw);
+                        if (sug) suggestion = sug;
                     }
                 }
 
