@@ -687,6 +687,39 @@ function extractActiveTask(raw) {
     return null;
 }
 
+// Extract a short list of tasks from tmux output (bulleted or numbered)
+function extractTaskList(raw) {
+    const cleaned = clean(raw);
+    const lines = cleaned.split('\n');
+    const tasks = [];
+
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 60); i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Skip noise
+        if (/hook|PostToolUse|PreToolUse/i.test(line)) continue;
+        if (/esc to interrupt|ctrl\+/i.test(line)) continue;
+
+        // Bullet or numbered task lines
+        let m = line.match(/^(?:[-*•▪]\s+|\d+\.\s+)(.+)$/);
+        if (!m) {
+            // Fallback: task-like imperative verbs
+            m = line.match(/^(Implement|Integrate|Fix|Add|Update|Remove|Create|Build|Refactor|Optimize|Test|Verify|Improve|Reduce|Increase)\b(.+)$/i);
+        }
+        if (m) {
+            let t = (m[1] || '') + (m[2] || '');
+            t = t.replace(/\s+/g, ' ').trim();
+            if (t.length > 0) tasks.push(t);
+        }
+        if (tasks.length >= 3) break;
+    }
+
+    if (tasks.length === 0) return null;
+    tasks.reverse();
+    return tasks.join(' | ');
+}
+
 // Extract real-time tool use from tmux output (since JSONL is delayed)
 function extractRealtimeTool(raw) {
     const cleaned = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
@@ -1126,6 +1159,12 @@ wss.on('connection', (ws) => {
                             cleanData.suggestion = sug;
                             console.log('[SUGGESTION] Detected:', JSON.stringify(sug));
                         }
+                        if (!cleanData.activeTask) {
+                            const taskList = extractTaskList(raw);
+                            if (taskList) {
+                                cleanData.activeTask = taskList;
+                            }
+                        }
                         const diff = extractDiffBackdrop(raw);
                         if (diff) {
                             cleanData.diff = diff;
@@ -1166,6 +1205,11 @@ wss.on('connection', (ws) => {
                         // Detect suggestion
                         const sug = detectSuggestionFromTmux(raw);
                         if (sug) suggestion = sug;
+
+                        if (!cleanData.activeTask) {
+                            const taskList = extractTaskList(raw);
+                            if (taskList) cleanData.activeTask = taskList;
+                        }
 
                         const diff = extractDiffBackdrop(raw);
                         if (diff) cleanData.diff = diff;
