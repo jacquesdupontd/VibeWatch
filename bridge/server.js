@@ -1148,6 +1148,13 @@ wss.on('connection', (ws) => {
                         const prompt = detectPrompt(raw);
                         if (prompt) {
                             cleanData.prompt = prompt;
+                            // Build QUESTION: status for watch status bar
+                            const parts = prompt.options.map(o => {
+                                if (o === prompt.options[0]) return '^ ' + o.label;
+                                if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
+                                return 'o ' + o.label;
+                            });
+                            cleanData.status = 'QUESTION:' + parts.join('  ');
                             console.log('[PROMPT] Detected:', JSON.stringify(prompt));
                         }
                         const sug = detectSuggestionFromTmux(raw);
@@ -1200,7 +1207,15 @@ wss.on('connection', (ws) => {
 
                         // Detect prompt
                         const prompt = detectPrompt(raw);
-                        if (prompt) cleanData.prompt = prompt;
+                        if (prompt) {
+                            cleanData.prompt = prompt;
+                            const parts = prompt.options.map(o => {
+                                if (o === prompt.options[0]) return '^ ' + o.label;
+                                if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
+                                return 'o ' + o.label;
+                            });
+                            cleanData.status = 'QUESTION:' + parts.join('  ');
+                        }
 
                         // Detect suggestion
                         const sug = detectSuggestionFromTmux(raw);
@@ -1242,13 +1257,13 @@ wss.on('connection', (ws) => {
                 cleanData.diff = stripAccents(cleanData.diff || '');
 
                 // Clamp to avoid AppMessage overflow
-                cleanData.summary = clampTextEnd(cleanData.summary, 700);
+                cleanData.summary = clampTextEnd(cleanData.summary, 500);
                 cleanData.userCmd = firstLineWithEllipsis(cleanData.userCmd, 160);
                 cleanData.lastTool = clampText(cleanData.lastTool, 80);
                 cleanData.status = clampText(cleanData.status, 40);
                 cleanData.activeTask = clampText(cleanData.activeTask, 80);
                 cleanData.suggestion = clampText(cleanData.suggestion, 120);
-                cleanData.diff = clampTextEnd(cleanData.diff, 1600);
+                cleanData.diff = clampTextEnd(cleanData.diff, 600);
 
                 // If status is stuck on Working but no active task/tool, mark Ready
                 if (cleanData.status &&
