@@ -687,7 +687,7 @@ function extractActiveTask(raw) {
     return null;
 }
 
-// Extract a short list of tasks from tmux output (bulleted or numbered)
+// Extract a short list of tasks from tmux output (ONLY task bullets)
 function extractTaskList(raw) {
     const cleaned = clean(raw);
     const lines = cleaned.split('\n');
@@ -701,15 +701,11 @@ function extractTaskList(raw) {
         if (/hook|PostToolUse|PreToolUse/i.test(line)) continue;
         if (/esc to interrupt|ctrl\+/i.test(line)) continue;
 
-        // Bullet or numbered task lines
-        let m = line.match(/^(?:[-*•▪]\s+|\d+\.\s+)(.+)$/);
-        if (!m) {
-            // Fallback: task-like imperative verbs
-            m = line.match(/^(Implement|Integrate|Fix|Add|Update|Remove|Create|Build|Refactor|Optimize|Test|Verify|Improve|Reduce|Increase)\b(.+)$/i);
-        }
+        // ONLY task bullets from Claude tasks panel
+        // Matches: "• Task", "▪ Task", "■ Task", "▢ Task", "□ Task"
+        const m = line.match(/^(?:[•▪■▢□◻◼]\s+)(.+)$/);
         if (m) {
-            let t = (m[1] || '') + (m[2] || '');
-            t = t.replace(/\s+/g, ' ').trim();
+            let t = (m[1] || '').replace(/\s+/g, ' ').trim();
             if (t.length > 0) tasks.push(t);
         }
         if (tasks.length >= 3) break;
@@ -1163,6 +1159,10 @@ wss.on('connection', (ws) => {
                             const taskList = extractTaskList(raw);
                             if (taskList) {
                                 cleanData.activeTask = taskList;
+                                // Only override status if we don't have a thinking word
+                                if (!cleanData.status || cleanData.status === 'Ready') {
+                                    cleanData.status = taskList;
+                                }
                             }
                         }
                         const diff = extractDiffBackdrop(raw);
@@ -1208,7 +1208,12 @@ wss.on('connection', (ws) => {
 
                         if (!cleanData.activeTask) {
                             const taskList = extractTaskList(raw);
-                            if (taskList) cleanData.activeTask = taskList;
+                            if (taskList) {
+                                cleanData.activeTask = taskList;
+                                if (!cleanData.status || cleanData.status === 'Ready') {
+                                    cleanData.status = taskList;
+                                }
+                            }
                         }
 
                         const diff = extractDiffBackdrop(raw);
