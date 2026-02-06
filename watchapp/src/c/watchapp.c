@@ -75,6 +75,8 @@ static int s_diff_chars_shown = 0;
 static int s_diff_chars_total = 0;
 static AppTimer *s_diff_stream_timer = NULL;
 static bool s_show_diff_backdrop = false;
+static bool s_diff_burst_active = false;
+static AppTimer *s_diff_burst_timer = NULL;
 
 // Streaming: character count
 static int s_chars_shown = 0;
@@ -1069,7 +1071,7 @@ static void start_streaming() {
 
 static void diff_stream_tick(void *data) {
   if (s_diff_chars_shown < s_diff_chars_total) {
-    s_diff_chars_shown += 3; // slower, nerdy typing
+    s_diff_chars_shown += s_diff_burst_active ? 12 : 3;
     if (s_diff_chars_shown > s_diff_chars_total)
       s_diff_chars_shown = s_diff_chars_total;
     layer_mark_dirty(s_canvas);
@@ -1083,6 +1085,13 @@ static void start_diff_streaming() {
   if (s_diff_stream_timer)
     app_timer_cancel(s_diff_stream_timer);
   s_diff_stream_timer = app_timer_register(20, diff_stream_tick, NULL);
+}
+
+static void diff_burst_tick(void *data) {
+  s_diff_burst_active = false;
+  s_show_diff_backdrop = false;
+  layer_mark_dirty(s_canvas);
+  s_diff_burst_timer = NULL;
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator,
@@ -1276,6 +1285,21 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       trigger_glitch_text();
     } else if (done_transition) {
       trigger_glitch_text();
+    }
+
+    // Burst diff glitch on Edit/Write/Update tools
+    if (s_last_tool[0] && s_diff_buffer[0]) {
+      if (strstr(s_last_tool, "Edit ") || strstr(s_last_tool, "Write ") ||
+          strstr(s_last_tool, "Update(")) {
+        s_diff_burst_active = true;
+        s_show_diff_backdrop = true;
+        s_diff_chars_total = count_chars_buf(s_diff_buffer);
+        s_diff_chars_shown = 0;
+        start_diff_streaming();
+        if (s_diff_burst_timer)
+          app_timer_cancel(s_diff_burst_timer);
+        s_diff_burst_timer = app_timer_register(900, diff_burst_tick, NULL);
+      }
     }
     return;
   }
@@ -1768,6 +1792,8 @@ static void window_unload(Window *window) {
     app_timer_cancel(s_stream_timer);
   if (s_diff_stream_timer)
     app_timer_cancel(s_diff_stream_timer);
+  if (s_diff_burst_timer)
+    app_timer_cancel(s_diff_burst_timer);
   if (s_fx_timer)
     app_timer_cancel(s_fx_timer);
   destroy_clean_layers();

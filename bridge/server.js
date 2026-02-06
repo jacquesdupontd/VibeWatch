@@ -251,7 +251,9 @@ function extractDiffBackdrop(raw) {
     for (let i = lines.length - 1; i >= Math.max(0, lines.length - 120); i--) {
         const s = lines[i].trim();
         if (!s) continue;
-        if (/^(\+|\-|\@\@|diff |index |--- |\+\+\+ )/.test(s)) {
+        if (/^(\+|\-|\@\@|diff |index |--- |\+\+\+ )/.test(s) ||
+            /^\s*[+-]\s+/.test(s) ||
+            /^\d+\s*[+-]\s+/.test(s)) {
             diffLines.push(s);
             if (diffLines.length >= 24) break;
         }
@@ -1070,6 +1072,7 @@ wss.on('connection', (ws) => {
     let activeSession = null;
     let lastSent = '';
     let pollInterval = null;
+    let deepCaptureTicks = 0;
 
     function sendMenu() {
         const sessions = listSessions();
@@ -1102,8 +1105,10 @@ wss.on('connection', (ws) => {
 
                     // Capture terminal ONLY for thinking word (status) and interactive prompts
                     try {
+                        const startLines = deepCaptureTicks > 0 ? -800 : -200;
+                        if (deepCaptureTicks > 0) deepCaptureTicks--;
                         const raw = execSync(
-                            `tmux capture-pane -t "${activeSession}" -p -e -S -50 2>/dev/null`,
+                            `tmux capture-pane -t "${activeSession}" -p -e -S ${startLines} 2>/dev/null`,
                             { encoding: 'utf8', timeout: 1000 }
                         );
                         const realtimeStatus = extractRealtimeStatus(raw);
@@ -1130,8 +1135,10 @@ wss.on('connection', (ws) => {
                 } else {
                     // FALLBACK: Use tmux capture if .jsonl not found
                     console.log('[JSONL] Fallback to tmux capture');
+                    const startLines = deepCaptureTicks > 0 ? -800 : -200;
+                    if (deepCaptureTicks > 0) deepCaptureTicks--;
                     const raw = execSync(
-                        `tmux capture-pane -t "${activeSession}" -p -e -S -200 2>/dev/null`,
+                        `tmux capture-pane -t "${activeSession}" -p -e -S ${startLines} 2>/dev/null`,
                         { encoding: 'utf8', timeout: 2000 }
                     );
 
@@ -1244,6 +1251,7 @@ wss.on('connection', (ws) => {
             else if (data.type === 'join') {
                 activeSession = data.name;
                 lastSent = '';
+                deepCaptureTicks = 6;
                 ws.send(JSON.stringify({ type: 'session_joined', name: data.name }));
                 startPolling();
             }
