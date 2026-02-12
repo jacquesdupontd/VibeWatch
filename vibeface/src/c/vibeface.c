@@ -787,6 +787,15 @@ static void shake_tick(void *context) {
     app_timer_register(100, shake_tick, NULL);
 }
 
+// Keep backlight on for ~1 minute at startup (20 x 3s = 60s)
+static void backlight_tick(void *data) {
+  int count = (int)(intptr_t)data;
+  light_enable_interaction();
+  if (count < 20) {
+    app_timer_register(3000, backlight_tick, (void *)(intptr_t)(count + 1));
+  }
+}
+
 static void tick_handler(struct tm *tick_time, TimeUnits units) {
     update_strings();
 
@@ -828,6 +837,10 @@ static void window_load(Window *window) {
     app_timer_register(500, animation_tick, NULL);
     app_timer_register(400, cursor_blink, NULL);
     app_timer_register(100, shake_tick, NULL);  // Shake timer for high chaos
+
+    // Keep backlight on for 1 minute at startup
+    light_enable_interaction();
+    app_timer_register(3000, backlight_tick, (void *)1);
 }
 
 static void window_unload(Window *window) {
