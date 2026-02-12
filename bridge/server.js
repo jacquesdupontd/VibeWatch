@@ -1345,8 +1345,9 @@ wss.on('connection', (ws) => {
             else if (data.type === 'resume') {
                 // Watch dictation done - resume output
                 ws.paused = false;
+                lastSent = ''; // Force fresh send on next poll (avoid stale dedup)
                 startPolling();
-                console.log('Output resumed');
+                console.log('Output resumed (lastSent reset)');
             }
             else if (data.type === 'key' && activeSession) {
                 execSync(`tmux send-keys -t "${activeSession}" "${data.content}"`);

@@ -3,6 +3,19 @@
 static Window *s_window;
 static Layer *s_canvas_layer;
 
+// Intro state
+static bool s_intro_active = true;
+static int s_intro_line = 0;
+#define INTRO_LINES 4
+static const char *INTRO_TEXT[] = {"I'm Claude.", "I write code.", "From this", "Pebble."};
+static char s_intro_display[64];
+static int s_intro_char_pos = 0;
+static int s_intro_pause = 0;
+static int s_intro_glitch_count = 0;
+static bool s_glitch_claude = false;
+static bool s_glitch_code = false;
+static bool s_intro_final_glitch = false;
+
 // State
 static char s_display_text[32];
 static int s_char_pos = 0;
@@ -333,6 +346,96 @@ static const char* get_current_message() {
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
 
+    // === INTRO MODE ===
+    if (s_intro_active) {
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+        GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+        static const char *INTRO_FONTS[] = {
+            FONT_KEY_GOTHIC_24_BOLD,
+            FONT_KEY_GOTHIC_24,
+            FONT_KEY_GOTHIC_18_BOLD,
+            FONT_KEY_ROBOTO_CONDENSED_21,
+            FONT_KEY_GOTHIC_18,
+        };
+        int y_start = 22;
+        int line_height = 32;
+
+        for (int i = 0; i < s_intro_line; i++) {
+            int ly = y_start + i * line_height;
+
+            if (i == 0 && s_glitch_claude) {
+                graphics_context_set_text_color(ctx, GColorMalachite);
+                graphics_draw_text(ctx, "> I'm ", font,
+                    GRect(8, ly, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                GSize pw = graphics_text_layout_get_content_size("> I'm ", font,
+                    GRect(0, 0, bounds.size.w, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+                GFont gf = fonts_get_system_font(INTRO_FONTS[rand() % 5]);
+                int sx = (rand() % 5) - 2, sy = (rand() % 3) - 1;
+                graphics_context_set_text_color(ctx, get_random_color());
+                graphics_draw_text(ctx, "Claude.", gf,
+                    GRect(8 + pw.w + sx, ly + sy, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                continue;
+            }
+
+            if (i == 1 && s_glitch_code) {
+                graphics_context_set_text_color(ctx, GColorMalachite);
+                graphics_draw_text(ctx, "> I write ", font,
+                    GRect(8, ly, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                GSize pw = graphics_text_layout_get_content_size("> I write ", font,
+                    GRect(0, 0, bounds.size.w, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+                GFont gf = fonts_get_system_font(INTRO_FONTS[rand() % 5]);
+                int sx = (rand() % 5) - 2, sy = (rand() % 3) - 1;
+                graphics_context_set_text_color(ctx, get_random_color());
+                graphics_draw_text(ctx, "code.", gf,
+                    GRect(8 + pw.w + sx, ly + sy, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                continue;
+            }
+
+            if (i == 3 && s_intro_final_glitch) {
+                GFont gf = fonts_get_system_font(INTRO_FONTS[rand() % 5]);
+                int sx = (rand() % 7) - 3, sy = (rand() % 5) - 2;
+                graphics_context_set_text_color(ctx, get_random_color());
+                graphics_draw_text(ctx, "> Pebble.", gf,
+                    GRect(8 + sx, ly + sy, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                continue;
+            }
+
+            char line_buf[72];
+            snprintf(line_buf, sizeof(line_buf), "> %s", INTRO_TEXT[i]);
+            graphics_context_set_text_color(ctx, GColorMalachite);
+            graphics_draw_text(ctx, line_buf, font,
+                GRect(8, ly, bounds.size.w - 16, 30),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+        }
+
+        if (s_intro_line < INTRO_LINES) {
+            int ly = y_start + s_intro_line * line_height;
+            graphics_context_set_text_color(ctx, GColorMalachite);
+            char cur_buf[72];
+            snprintf(cur_buf, sizeof(cur_buf), "> %s", s_intro_display);
+            graphics_draw_text(ctx, cur_buf, font,
+                GRect(8, ly, bounds.size.w - 16, 30),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+            if (s_cursor_visible) {
+                GSize ts = graphics_text_layout_get_content_size(
+                    cur_buf, font, GRect(0, 0, bounds.size.w, 30),
+                    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+                graphics_context_set_fill_color(ctx, GColorMalachite);
+                graphics_fill_rect(ctx, GRect(8 + ts.w + 2,
+                    ly + 6, 10, 18), 0, GCornerNone);
+            }
+        }
+        return;
+    }
+
     // Background - changes based on chaos and glitch state
     GColor bg = s_bg_color;
 
@@ -532,6 +635,53 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 }
 
 static void animation_tick(void *context);
+static void shake_tick(void *context);
+
+static void intro_tick(void *context) {
+    if (!s_intro_active) return;
+
+    if (s_intro_line >= INTRO_LINES) {
+        s_intro_final_glitch = true;
+        if (s_intro_glitch_count < 55) {
+            s_intro_glitch_count++;
+            layer_mark_dirty(s_canvas_layer);
+            app_timer_register(60 + (rand() % 60), intro_tick, NULL);
+            return;
+        }
+        s_intro_active = false;
+        s_display_text[0] = '\0';
+        s_phase = 0;
+        s_char_pos = 0;
+        s_typing = true;
+        update_strings();
+        app_timer_register(100, shake_tick, NULL);
+        layer_mark_dirty(s_canvas_layer);
+        app_timer_register(500, animation_tick, NULL);
+        return;
+    }
+
+    const char *line = INTRO_TEXT[s_intro_line];
+    if (s_intro_char_pos < (int)strlen(line)) {
+        s_intro_display[s_intro_char_pos] = line[s_intro_char_pos];
+        s_intro_display[s_intro_char_pos + 1] = '\0';
+        s_intro_char_pos++;
+        layer_mark_dirty(s_canvas_layer);
+        app_timer_register(70 + (rand() % 60), intro_tick, NULL);
+    } else {
+        if (s_intro_line == 0) s_glitch_claude = true;
+        if (s_intro_line == 1) s_glitch_code = true;
+
+        s_intro_pause++;
+        if (s_intro_pause >= 6) {
+            s_intro_line++;
+            s_intro_char_pos = 0;
+            s_intro_display[0] = '\0';
+            s_intro_pause = 0;
+        }
+        layer_mark_dirty(s_canvas_layer);
+        app_timer_register(100, intro_tick, NULL);
+    }
+}
 
 static void next_phase() {
     s_phase = (s_phase + 1) % 4;
@@ -829,14 +979,23 @@ static void window_load(Window *window) {
     s_cursor_size = 12;
     s_text_shake_x = 0;
     s_text_shake_y = 0;
-    s_first_loop = true;  // First loop always shows "vibecode"
+    s_first_loop = true;
 
-    APP_LOG(APP_LOG_LEVEL_INFO, "VibeFace starting - Chaos L%d I%d (minute %d)",
-            s_chaos_level, s_chaos_intensity, s_current_minute);
+    // Start intro sequence
+    s_intro_active = true;
+    s_intro_line = 0;
+    s_intro_char_pos = 0;
+    s_intro_display[0] = '\0';
+    s_intro_pause = 0;
+    s_glitch_claude = false;
+    s_glitch_code = false;
+    s_intro_final_glitch = false;
+    s_intro_glitch_count = 0;
 
-    app_timer_register(500, animation_tick, NULL);
+    APP_LOG(APP_LOG_LEVEL_INFO, "VibeFace starting with intro");
+
+    app_timer_register(800, intro_tick, NULL);
     app_timer_register(400, cursor_blink, NULL);
-    app_timer_register(100, shake_tick, NULL);  // Shake timer for high chaos
 
     // Keep backlight on for 1 minute at startup
     light_enable_interaction();

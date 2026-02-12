@@ -1561,6 +1561,28 @@ static void post_dictation_resume(void *data) {
 static void post_dictation_send(void *data) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Post-dictation send");
   if (s_dictation_pending[0]) {
+    // Instant visual feedback on watch - show the sent prompt immediately
+    if (s_display_mode == MODE_CLEAN) {
+      strncpy(s_user_cmd, s_dictation_pending, sizeof(s_user_cmd) - 1);
+      s_user_cmd[sizeof(s_user_cmd) - 1] = '\0';
+      strncpy(s_claude_summary, "Sending to Claude...", sizeof(s_claude_summary) - 1);
+      strncpy(s_status, "Sending...", sizeof(s_status) - 1);
+      s_last_tool[0] = '\0';
+      s_suggestion[0] = '\0';
+      if (s_clean_claude_layer)
+        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+      if (s_clean_prompt_layer) {
+        text_layer_set_text(s_clean_prompt_layer, s_user_cmd);
+        text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
+        layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), false);
+        start_prompt_marquee();
+      }
+      if (s_clean_status_layer) {
+        start_status_marquee();
+      }
+      layer_mark_dirty(s_canvas);
+    }
+
     char buf[220];
     snprintf(buf, sizeof(buf), "dictation:%s", s_dictation_pending);
     APP_LOG(APP_LOG_LEVEL_INFO, "Sending: %s", buf);
