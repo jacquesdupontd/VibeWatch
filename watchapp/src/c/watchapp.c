@@ -83,6 +83,7 @@ static int s_diff_chars_total = 0;
 static AppTimer *s_diff_stream_timer = NULL;
 static bool s_show_diff_backdrop = false;
 static bool s_diff_burst_active = false;
+static bool s_clean_dirty = false; // Deferred CLEAN UI processing
 static AppTimer *s_diff_burst_timer = NULL;
 
 // Streaming: character count
@@ -127,12 +128,16 @@ static void start_claude_scroll();
 static void create_clean_layers();
 static void claude_scroll_stopped(Animation *animation, bool finished,
                                   void *context);
+static void stop_anim_safe(PropertyAnimation **anim_ptr);
 static void fx_update(Layer *layer, GContext *ctx);
 static void fx_tick(void *data);
 static void trigger_glitch_short();
 static void trigger_glitch_text();
+static void start_diff_streaming();
+static void diff_burst_tick(void *data);
 
 static void clean_show_history_index(int idx) {
+
   if (!s_clean_claude_layer)
     return;
   if (idx < 0 || idx >= s_clean_hist_count)
@@ -150,13 +155,8 @@ static void clean_show_history_index(int idx) {
   GSize size = text_layer_get_content_size(s_clean_claude_layer);
   bool too_long = (size.h > (s_ly_claude_h - 14)); // > visible zone
 
-  // Stop any existing scroll
-  if (s_claude_scroll_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_claude_scroll_anim));
-    property_animation_destroy(s_claude_scroll_anim);
-    s_claude_scroll_anim = NULL;
-  }
+  // Stop any existing scroll (NULL-first to prevent double-free)
+  stop_anim_safe(&s_claude_scroll_anim);
 
   if (too_long) {
     s_auto_scroll_enabled = true;
@@ -726,16 +726,15 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 
 // Start smooth scroll animation for Claude text - INFINITE VERTICAL LOOP
 static void start_claude_scroll() {
+
   if (!s_clean_claude_layer || !s_auto_scroll_enabled)
     return;
 
-  // Stop existing animation
-  if (s_claude_scroll_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_claude_scroll_anim));
-    property_animation_destroy(s_claude_scroll_anim);
-    s_claude_scroll_anim = NULL;
-  }
+  // Don't restart if animation already running - let it finish its cycle
+  if (s_claude_scroll_anim) return;
+
+  // Stop existing animation (NULL-first to prevent double-free in stopped callback)
+  stop_anim_safe(&s_claude_scroll_anim);
 
   if (s_clean_scroll_src[0] == '\0')
     return;
@@ -760,6 +759,7 @@ static void start_claude_scroll() {
 
   s_claude_scroll_anim = property_animation_create_layer_frame(
       text_layer_get_layer(s_clean_claude_layer), &start_frame, &finish_frame);
+  if (!s_claude_scroll_anim) return; // OOM guard
 
   Animation *anim = property_animation_get_animation(s_claude_scroll_anim);
   // Speed: 30ms/px, continuous loop
@@ -815,17 +815,20 @@ static void prompt_marquee_stopped(Animation *animation, bool finished,
 }
 
 // Start horizontal marquee for command layer (cyan)
+static char s_prev_marquee_cmd[256] = "";
 static void start_command_marquee() {
+
   if (!s_clean_command_layer)
     return;
 
-  // Stop existing animation
-  if (s_command_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_command_marquee_anim));
-    property_animation_destroy(s_command_marquee_anim);
-    s_command_marquee_anim = NULL;
-  }
+  // Don't restart if animation already running - let it finish its cycle
+  if (s_command_marquee_anim) return;
+
+  strncpy(s_prev_marquee_cmd, s_last_tool, sizeof(s_prev_marquee_cmd) - 1);
+  s_prev_marquee_cmd[sizeof(s_prev_marquee_cmd) - 1] = '\0';
+
+  // Stop existing animation (NULL-first to prevent double-free in stopped callback)
+  stop_anim_safe(&s_command_marquee_anim);
 
   if (s_last_tool[0] == '\0')
     return;
@@ -853,6 +856,7 @@ static void start_command_marquee() {
 
     s_command_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_command_layer), &start, &finish);
+    if (!s_command_marquee_anim) goto cmd_fallback; // OOM guard
 
     Animation *anim = property_animation_get_animation(s_command_marquee_anim);
     animation_set_duration(
@@ -862,7 +866,8 @@ static void start_command_marquee() {
         anim, (AnimationHandlers){.stopped = command_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
-    // Text is short - show original
+cmd_fallback:
+    // Text is short or OOM - show static
     text_layer_set_text(s_clean_command_layer, s_last_tool);
     layer_set_frame(text_layer_get_layer(s_clean_command_layer),
                     GRect(4, s_ly_cmd_y, 136, 16));
@@ -870,21 +875,27 @@ static void start_command_marquee() {
 }
 
 // Start horizontal marquee for prompt layer (white/yellow)
+static char s_prev_marquee_prompt[128] = "";
 static void start_prompt_marquee() {
+
   if (!s_clean_prompt_layer)
     return;
 
-  // Stop existing animation
-  if (s_prompt_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_prompt_marquee_anim));
-    property_animation_destroy(s_prompt_marquee_anim);
-    s_prompt_marquee_anim = NULL;
+  const char *text = s_suggestion[0] ? s_suggestion : s_user_cmd;
+  if (!text || text[0] == '\0') {
+    stop_anim_safe(&s_prompt_marquee_anim);
+    s_prev_marquee_prompt[0] = '\0';
+    return;
   }
 
-  const char *text = s_suggestion[0] ? s_suggestion : s_user_cmd;
-  if (!text || text[0] == '\0')
-    return;
+  // Don't restart if animation already running - let it finish its cycle
+  if (s_prompt_marquee_anim) return;
+
+  strncpy(s_prev_marquee_prompt, text, sizeof(s_prev_marquee_prompt) - 1);
+  s_prev_marquee_prompt[sizeof(s_prev_marquee_prompt) - 1] = '\0';
+
+  // Stop existing animation (NULL-first to prevent double-free in stopped callback)
+  stop_anim_safe(&s_prompt_marquee_anim);
 
   // Measurement
   static char measure_buf[300];
@@ -906,6 +917,7 @@ static void start_prompt_marquee() {
 
     s_prompt_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
+    if (!s_prompt_marquee_anim) goto prompt_fallback; // OOM guard
 
     Animation *anim = property_animation_get_animation(s_prompt_marquee_anim);
     animation_set_duration(anim, one_cycle_width * 30);
@@ -914,6 +926,7 @@ static void start_prompt_marquee() {
         anim, (AnimationHandlers){.stopped = prompt_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
+prompt_fallback:
     text_layer_set_text(s_clean_prompt_layer, text);
     layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
                     GRect(4, s_ly_prompt_y, 136, 16));
@@ -934,26 +947,32 @@ static void status_marquee_stopped(Animation *animation, bool finished,
 }
 
 // Start horizontal marquee for status layer (active task or status)
+static char s_prev_marquee_status[128] = "";
 static void start_status_marquee() {
+
   if (!s_clean_status_layer)
     return;
 
-  // Stop existing animation
-  if (s_status_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_status_marquee_anim));
-    property_animation_destroy(s_status_marquee_anim);
-    s_status_marquee_anim = NULL;
-  }
-
-  // Determine text
+  // Determine text first to check if changed
   bool has_suggestion = (s_suggestion[0] != '\0');
   const char *text = has_suggestion
                          ? "SELECT TO ACCEPT"
                          : (s_task_running ? s_active_task : s_status);
 
-  if (!text || text[0] == '\0')
+  if (!text || text[0] == '\0') {
+    stop_anim_safe(&s_status_marquee_anim);
+    s_prev_marquee_status[0] = '\0';
     return;
+  }
+
+  // Don't restart if animation already running - let it finish its cycle
+  if (s_status_marquee_anim) return;
+
+  strncpy(s_prev_marquee_status, text, sizeof(s_prev_marquee_status) - 1);
+  s_prev_marquee_status[sizeof(s_prev_marquee_status) - 1] = '\0';
+
+  // Stop existing animation
+  stop_anim_safe(&s_status_marquee_anim);
 
   // Measurement
   static char measure_buf[400];
@@ -976,6 +995,7 @@ static void start_status_marquee() {
 
     s_status_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_status_layer), &start, &finish);
+    if (!s_status_marquee_anim) goto status_fallback; // OOM guard
 
     Animation *anim = property_animation_get_animation(s_status_marquee_anim);
     animation_set_duration(anim, one_cycle_width * 30);
@@ -984,6 +1004,7 @@ static void start_status_marquee() {
         anim, (AnimationHandlers){.stopped = status_marquee_stopped}, NULL);
     animation_schedule(anim);
   } else {
+status_fallback:
     text_layer_set_text(s_clean_status_layer, text);
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
     layer_set_frame(text_layer_get_layer(s_clean_status_layer),
@@ -1047,6 +1068,50 @@ static void trigger_glitch_text() {
     s_fx_timer = app_timer_register(60, fx_tick, NULL);
 }
 
+// Deferred CLEAN processing - runs from blink_tick, NOT inbox callback
+static void process_clean_deferred() {
+  s_clean_dirty = false;
+
+  // Diff disabled for stability
+  s_show_diff_backdrop = false;
+
+  // History push
+  bool summary_changed = (strcmp(s_prev_clean_summary, s_claude_summary) != 0);
+  bool cmd_changed = (strcmp(s_prev_clean_cmd, s_user_cmd) != 0);
+
+  if (summary_changed && s_claude_summary[0]) {
+    if (s_clean_hist_count < CLEAN_HISTORY_MAX) {
+      strncpy(s_clean_history[s_clean_hist_count], s_claude_summary,
+              sizeof(s_clean_history[0]) - 1);
+      s_clean_history[s_clean_hist_count][sizeof(s_clean_history[0]) - 1] = '\0';
+      s_clean_hist_count++;
+    } else {
+      for (int i = 1; i < CLEAN_HISTORY_MAX; i++) {
+        strncpy(s_clean_history[i - 1], s_clean_history[i],
+                sizeof(s_clean_history[0]) - 1);
+        s_clean_history[i - 1][sizeof(s_clean_history[0]) - 1] = '\0';
+      }
+      strncpy(s_clean_history[CLEAN_HISTORY_MAX - 1], s_claude_summary,
+              sizeof(s_clean_history[0]) - 1);
+      s_clean_history[CLEAN_HISTORY_MAX - 1][sizeof(s_clean_history[0]) - 1] = '\0';
+    }
+    s_clean_hist_index = s_clean_hist_count - 1;
+    clean_show_history_index(s_clean_hist_index);
+    trigger_glitch_text();
+  }
+
+  if (cmd_changed && s_user_cmd[0]) {
+    trigger_glitch_short();
+  }
+
+  // Start marquees (only if none running - anti-churn)
+  start_command_marquee();
+  start_prompt_marquee();
+  start_status_marquee();
+
+  // Diff burst disabled for stability
+}
+
 // Simple blink and marquee timer
 static void blink_tick(void *data) {
   s_cursor_visible = !s_cursor_visible;
@@ -1057,6 +1122,11 @@ static void blink_tick(void *data) {
 
   // Keep backlight on (every ~3s)
   if (s_anim_counter % 12 == 0) light_enable_interaction();
+
+  // Deferred CLEAN processing (heavy work outside inbox callback)
+  if (s_clean_dirty) {
+    process_clean_deferred();
+  }
 
   // Dynamic UI update (blinking status/prompt)
   update_clean_ui_state();
@@ -1164,8 +1234,19 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       return;
     }
 
+
     // CLEAN:cmd|summary|status|tool|suggestion|activeTask - structured data
     if (strncmp(data, "CLEAN:", 6) == 0) {
+      // Throttle: skip if last CLEAN was < 300ms ago (prevent flood crash)
+      static uint32_t s_last_clean_ms = 0;
+      uint32_t now = 0;
+      time_t ts; uint16_t ms_part;
+      time_ms(&ts, &ms_part);
+      now = (uint32_t)ts * 1000 + ms_part;
+      if (s_last_clean_ms && (now - s_last_clean_ms) < 500) {
+        return; // Drop this message, too fast
+      }
+      s_last_clean_ms = now;
       strncpy(s_prev_clean_cmd, s_user_cmd, sizeof(s_prev_clean_cmd) - 1);
       s_prev_clean_cmd[sizeof(s_prev_clean_cmd) - 1] = '\0';
       strncpy(s_prev_clean_summary, s_claude_summary,
@@ -1210,37 +1291,18 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           strncpy(s_active_task, token, sizeof(s_active_task) - 1);
           s_task_running = (s_active_task[0] != '\0');
         } else if (i == 6) {
-          strncpy(s_diff_buffer, token, sizeof(s_diff_buffer) - 1);
-          s_diff_buffer[sizeof(s_diff_buffer) - 1] = '\0';
+          // Diff disabled for stability
+          s_diff_buffer[0] = '\0';
         }
 
         if (!remainder)
           break;
       }
 
-      // Diff streaming setup
-      s_diff_chars_total = count_chars_buf(s_diff_buffer);
-      if (s_diff_chars_total > 0) {
-        s_diff_chars_shown = 0;
-        start_diff_streaming();
-      }
-
-      // Decide when to show diff backdrop (only if main text absent/short)
-      int summary_len = (int)strlen(s_claude_summary);
-      s_show_diff_backdrop = false;
-      if (summary_len == 0 ||
-          strstr(s_claude_summary, "[No active data") ||
-          strstr(s_claude_summary, "[Active]") ||
-          (strstr(s_status, "...") && summary_len < 40)) {
-        s_show_diff_backdrop = true;
-      }
-
+      // LIGHTWEIGHT: just set text on layers, NO animations, NO layout
+      // Heavy work deferred to blink_tick via s_clean_dirty flag
       if (s_clean_claude_layer) {
-        // Only set text directly if no scroll animation is running
-        // (scroll uses s_claude_marquee_buf which would be overwritten)
-        if (!s_claude_scroll_anim) {
-          text_layer_set_text(s_clean_claude_layer, s_claude_summary);
-        }
+        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
         layer_set_hidden(text_layer_get_layer(s_clean_claude_layer),
                          s_claude_summary[0] == '\0');
       }
@@ -1248,7 +1310,6 @@ static void inbox_received_callback(DictionaryIterator *iterator,
         text_layer_set_text(s_clean_command_layer, s_last_tool);
         layer_set_hidden(text_layer_get_layer(s_clean_command_layer),
                          s_last_tool[0] == '\0');
-        start_command_marquee();
       }
       if (s_clean_prompt_layer) {
         bool is_suggestion = (s_suggestion[0] != '\0');
@@ -1258,73 +1319,15 @@ static void inbox_received_callback(DictionaryIterator *iterator,
                          txt[0] == '\0');
         text_layer_set_text_color(s_clean_prompt_layer,
                                   is_suggestion ? GColorYellow : GColorWhite);
-        start_prompt_marquee();
       }
-    if (s_clean_status_layer) {
-      layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
-        // Handle background color
-        GColor bg = GColorDarkGray;
-        if (s_suggestion[0])
-          bg = GColorCobaltBlue;
-        else if (s_task_running)
-          bg = GColorPurple;
-
-        text_layer_set_background_color(s_clean_status_layer, bg);
-      start_status_marquee(); // Robust: always start/restart
-    }
-    bool summary_changed =
-        (strcmp(s_prev_clean_summary, s_claude_summary) != 0);
-    bool cmd_changed = (strcmp(s_prev_clean_cmd, s_user_cmd) != 0);
-    bool done_transition =
-        (strstr(s_prev_clean_status, "Working") ||
-         strstr(s_prev_clean_status, "...")) &&
-        (strstr(s_status, "Done") || strstr(s_status, "Ready") ||
-         strstr(s_status, "Finished"));
-
-    if (cmd_changed && s_user_cmd[0]) {
-      trigger_glitch_short();
-    }
-    if (summary_changed && s_claude_summary[0]) {
-      // Push into history (no auto-scroll)
-      if (s_clean_hist_count < CLEAN_HISTORY_MAX) {
-        strncpy(s_clean_history[s_clean_hist_count], s_claude_summary,
-                sizeof(s_clean_history[0]) - 1);
-        s_clean_history[s_clean_hist_count][sizeof(s_clean_history[0]) - 1] =
-            '\0';
-        s_clean_hist_count++;
-      } else {
-        for (int i = 1; i < CLEAN_HISTORY_MAX; i++) {
-          strncpy(s_clean_history[i - 1], s_clean_history[i],
-                  sizeof(s_clean_history[0]) - 1);
-          s_clean_history[i - 1][sizeof(s_clean_history[0]) - 1] = '\0';
-        }
-        strncpy(s_clean_history[CLEAN_HISTORY_MAX - 1], s_claude_summary,
-                sizeof(s_clean_history[0]) - 1);
-        s_clean_history[CLEAN_HISTORY_MAX - 1]
-            [sizeof(s_clean_history[0]) - 1] = '\0';
+      if (s_clean_status_layer) {
+        layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
+        update_clean_ui_state();
       }
-      s_clean_hist_index = s_clean_hist_count - 1;
-      clean_show_history_index(s_clean_hist_index);
-      trigger_glitch_text();
-    } else if (done_transition) {
-      trigger_glitch_text();
-    }
-
-    // Burst diff glitch on Edit/Write/Update tools
-    if (s_last_tool[0] && s_diff_buffer[0]) {
-      if (strstr(s_last_tool, "Edit ") || strstr(s_last_tool, "Write ") ||
-          strstr(s_last_tool, "Update(")) {
-        s_diff_burst_active = true;
-        s_show_diff_backdrop = true;
-        s_diff_chars_total = count_chars_buf(s_diff_buffer);
-        s_diff_chars_shown = 0;
-        start_diff_streaming();
-        if (s_diff_burst_timer)
-          app_timer_cancel(s_diff_burst_timer);
-        s_diff_burst_timer = app_timer_register(900, diff_burst_tick, NULL);
-      }
-    }
-    return;
+      // Mark dirty - blink_tick will handle animations/history
+      s_clean_dirty = true;
+      layer_mark_dirty(s_canvas);
+      return;
   }
 
     // Regular output - only in session mode
@@ -1520,6 +1523,14 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
 }
 // Delayed restart of timers/animations after dictation system cleanup
 // Timer: start dictation after bridge is paused
+static void stop_anim_safe(PropertyAnimation **anim_ptr) {
+  PropertyAnimation *anim = *anim_ptr;
+  if (!anim) return;
+  *anim_ptr = NULL; // NULL first so stopped callback won't double-destroy
+  animation_unschedule(property_animation_get_animation(anim));
+  property_animation_destroy(anim);
+}
+
 static void start_dictation_deferred(void *data) {
   // Kill all timers and animations NOW (right before dictation)
   if (s_cursor_timer) { app_timer_cancel(s_cursor_timer); s_cursor_timer = NULL; }
@@ -1527,11 +1538,10 @@ static void start_dictation_deferred(void *data) {
   if (s_diff_stream_timer) { app_timer_cancel(s_diff_stream_timer); s_diff_stream_timer = NULL; }
   if (s_diff_burst_timer) { app_timer_cancel(s_diff_burst_timer); s_diff_burst_timer = NULL; }
   if (s_fx_timer) { app_timer_cancel(s_fx_timer); s_fx_timer = NULL; }
-  if (s_claude_scroll_anim) { property_animation_destroy(s_claude_scroll_anim); s_claude_scroll_anim = NULL; }
-  if (s_command_marquee_anim) { property_animation_destroy(s_command_marquee_anim); s_command_marquee_anim = NULL; }
-  if (s_prompt_marquee_anim) { property_animation_destroy(s_prompt_marquee_anim); s_prompt_marquee_anim = NULL; }
-  if (s_status_marquee_anim) { property_animation_destroy(s_status_marquee_anim); s_status_marquee_anim = NULL; }
-  free(malloc(2048)); // Bobby's memory trick
+  stop_anim_safe(&s_claude_scroll_anim);
+  stop_anim_safe(&s_command_marquee_anim);
+  stop_anim_safe(&s_prompt_marquee_anim);
+  stop_anim_safe(&s_status_marquee_anim);
   APP_LOG(APP_LOG_LEVEL_INFO, "Starting dictation (heap: %d)", (int)heap_bytes_free());
   dictation_session_start(s_dictation_session);
 }
@@ -1552,6 +1562,7 @@ static void post_dictation_resume(void *data) {
   } else {
     APP_LOG(APP_LOG_LEVEL_INFO, "Resume failed after retries");
   }
+  s_in_dictation = false; // Now safe to accept inbox messages again
   if (!s_cursor_timer) {
     s_cursor_timer = app_timer_register(250, blink_tick, NULL);
   }
@@ -1655,7 +1666,7 @@ static void dictation_callback(DictationSession *session,
     sanitize_ascii(s_dictation_pending, transcription, sizeof(s_dictation_pending));
     APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_dictation_pending);
   }
-  s_in_dictation = false;
+  // Keep s_in_dictation=true to block inbox until resume completes
   // Send "dictation:text" + resume via timer (bridge is paused, BT quiet)
   app_timer_register(500, post_dictation_send, NULL);
 }
@@ -1898,31 +1909,11 @@ static void create_clean_layers() {
 
 // Destroy CLEAN mode layers
 static void destroy_clean_layers() {
-  // Stop animations first
-  if (s_claude_scroll_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_claude_scroll_anim));
-    property_animation_destroy(s_claude_scroll_anim);
-    s_claude_scroll_anim = NULL;
-  }
-  if (s_command_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_command_marquee_anim));
-    property_animation_destroy(s_command_marquee_anim);
-    s_command_marquee_anim = NULL;
-  }
-  if (s_prompt_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_prompt_marquee_anim));
-    property_animation_destroy(s_prompt_marquee_anim);
-    s_prompt_marquee_anim = NULL;
-  }
-  if (s_status_marquee_anim) {
-    animation_unschedule(
-        property_animation_get_animation(s_status_marquee_anim));
-    property_animation_destroy(s_status_marquee_anim);
-    s_status_marquee_anim = NULL;
-  }
+  // Stop animations first (NULL-first to prevent double-free in stopped callbacks)
+  stop_anim_safe(&s_claude_scroll_anim);
+  stop_anim_safe(&s_command_marquee_anim);
+  stop_anim_safe(&s_prompt_marquee_anim);
+  stop_anim_safe(&s_status_marquee_anim);
 
   if (s_clean_claude_layer) {
     text_layer_destroy(s_clean_claude_layer);
@@ -2013,7 +2004,7 @@ static void init() {
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_outbox_sent(NULL);
   app_message_register_outbox_failed(NULL);
-  app_message_open(2048, 512);
+  app_message_open(4096, 512);
   // Dictation session for voice input
   // Buffer size 0 = dynamic allocation (like Bobby does)
   s_dictation_session = dictation_session_create(0, dictation_callback, NULL);

@@ -91,9 +91,12 @@ Pebble.addEventListener('ready', function () {
                 content += "\nS" + sug;
                 payload["TERMINAL_DATA"] = content;
             }
-            queue.push(payload);
+            // Only send verbose payload if NO clean data (saves BLE bandwidth)
+            if (!msg.cleanData) {
+                queue.push(payload);
+            }
 
-            // Also send CLEAN data if available
+            // Send CLEAN data (preferred - structured, smaller)
             if (msg.cleanData) {
                 var cd = msg.cleanData;
                 // Sanitize: replace pipe chars and strip emojis
@@ -122,7 +125,17 @@ Pebble.addEventListener('ready', function () {
                     return out.replace(/\|/g, " ");
                 }
                 // Format: CLEAN:userCmd|summary|status|lastTool|suggestion|activeTask|diff
-                var cleanStr = "CLEAN:" + sanitizePreserveNewlines(cd.userCmd) + "|" + sanitizePreserveNewlines(cd.summary) + "|" + sanitizePreserveNewlines(cd.status) + "|" + sanitizePreserveNewlines(cd.lastTool) + "|" + sanitizePreserveNewlines(cd.suggestion) + "|" + sanitizePreserveNewlines(cd.activeTask) + "|" + sanitizePreserveNewlines(cd.diff);
+                // Truncate fields to fit in 2048-byte AppMessage inbox (~2000 usable)
+                var uCmd = sanitizePreserveNewlines(cd.userCmd).substring(0, 80);
+                var uSum = sanitizePreserveNewlines(cd.summary).substring(0, 400);
+                var uStat = sanitizePreserveNewlines(cd.status).substring(0, 20);
+                var uTool = sanitizePreserveNewlines(cd.lastTool).substring(0, 100);
+                var uSug = sanitizePreserveNewlines(cd.suggestion).substring(0, 80);
+                var uTask = sanitizePreserveNewlines(cd.activeTask).substring(0, 80);
+                var uDiff = sanitizePreserveNewlines(cd.diff).substring(0, 200);
+                var cleanStr = "CLEAN:" + uCmd + "|" + uSum + "|" + uStat + "|" + uTool + "|" + uSug + "|" + uTask + "|" + uDiff;
+                // Final safety: hard cap at 1950 bytes
+                if (cleanStr.length > 1000) cleanStr = cleanStr.substring(0, 1000);
                 queue.push({ "TERMINAL_DATA": cleanStr });
             }
             trySend();
@@ -137,6 +150,10 @@ Pebble.addEventListener('ready', function () {
     var backedOff = false;
     function trySend() {
         if (sending || queue.length === 0 || backedOff) return;
+        // Drop stale messages - only send the latest (older CLEAN data is useless)
+        while (queue.length > 1) {
+            queue.shift();
+        }
         var payload = queue.shift();
         sending = true;
 
@@ -162,7 +179,7 @@ Pebble.addEventListener('ready', function () {
                 clearTimeout(safetyTimeout);
                 sending = false;
                 failCount = 0;
-                setTimeout(trySend, 20);
+                setTimeout(trySend, 200);
             },
             function (e) {
                 clearTimeout(safetyTimeout);
