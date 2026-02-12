@@ -33,7 +33,7 @@ static char s_prompt_text[64];
 static int s_prompt_keys[3] = {1, 2, 3};
 
 // Menu state
-typedef enum { STATE_MENU, STATE_SESSION } AppState;
+typedef enum { STATE_MENU, STATE_SESSION, STATE_QUESTION } AppState;
 static AppState s_state = STATE_MENU;
 static char s_sessions[5][32];
 static int s_session_count = 0;
@@ -46,7 +46,7 @@ static DisplayMode s_display_mode = MODE_CLEAN;
 static char s_user_cmd[128] = "";
 static char s_claude_summary[1024] =
     ""; // Larger buffer for multiple paragraphs
-static char s_status[32] = "Ready";
+static char s_status[256] = "Ready";
 static char s_last_tool[256] = "";   // Increased for long commands
 static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[128] = ""; // Increased for long task names
@@ -56,7 +56,14 @@ static int s_ready_counter = 0;     // Counts blink ticks while status is "Ready
 static bool s_ready_vibrated = false; // Already vibrated for this Ready period
 static char s_prev_clean_cmd[128] = "";
 static char s_prev_clean_summary[1024] = "";
-static char s_prev_clean_status[32] = "Ready";
+static char s_prev_clean_status[256] = "Ready";
+
+// Question state (AskUserQuestion full-screen)
+static char s_question_text[256] = "";
+static char s_question_opts[5][48];  // up to 4 options + "Other"
+static int s_question_nums[5];       // key numbers (1-4, 0 for Other)
+static int s_question_count = 0;
+static int s_question_selected = 0;
 
 // Marquee duplicate buffers for seamless infinite scroll (2 full copies +
 // separator)
@@ -597,8 +604,124 @@ static void draw_menu(GContext *ctx, GRect bounds) {
       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
+// Parse question data from summary: "?question\nOPT:label1\nOPT:label2\n..."
+static void parse_question_from_clean() {
+  s_question_count = 0;
+  s_question_selected = 0;
+  s_question_text[0] = '\0';
+
+  // Summary format: "?question text\nOPT:label1\nOPT:label2\n..."
+  char work[1024];
+  strncpy(work, s_claude_summary, sizeof(work) - 1);
+  work[sizeof(work) - 1] = '\0';
+
+  // First line: question text (skip leading '?')
+  char *nl = strchr(work, '\n');
+  if (nl) {
+    *nl = '\0';
+    const char *q = (work[0] == '?') ? work + 1 : work;
+    strncpy(s_question_text, q, sizeof(s_question_text) - 1);
+    s_question_text[sizeof(s_question_text) - 1] = '\0';
+    char *p = nl + 1;
+
+    // Parse OPT: lines
+    while (*p && s_question_count < 4) {
+      char *next_nl = strchr(p, '\n');
+      if (next_nl) *next_nl = '\0';
+
+      if (strncmp(p, "OPT:", 4) == 0) {
+        strncpy(s_question_opts[s_question_count], p + 4, 47);
+        s_question_opts[s_question_count][47] = '\0';
+        s_question_nums[s_question_count] = s_question_count + 1;
+        s_question_count++;
+      }
+
+      if (next_nl) {
+        p = next_nl + 1;
+      } else {
+        break;
+      }
+    }
+  } else {
+    // No newlines - just question text, no options
+    const char *q = (work[0] == '?') ? work + 1 : work;
+    strncpy(s_question_text, q, sizeof(s_question_text) - 1);
+    s_question_text[sizeof(s_question_text) - 1] = '\0';
+  }
+
+  // Add "Other (speak)" as last option
+  if (s_question_count > 0 && s_question_count < 5) {
+    strncpy(s_question_opts[s_question_count], "Other (speak)", 48);
+    s_question_nums[s_question_count] = 0;
+    s_question_count++;
+  }
+}
+
+static void draw_question(GContext *ctx, GRect bounds) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  GFont small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  GFont opt_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  int y = 2;
+
+  // Question text (wrapping, cyan, capped to ~40px max)
+  graphics_context_set_text_color(ctx, GColorCyan);
+  graphics_draw_text(ctx, s_question_text, small,
+      GRect(4, y, bounds.size.w - 8, 42),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  GSize qsize = graphics_text_layout_get_content_size(
+      s_question_text, small, GRect(4, y, bounds.size.w - 8, 42),
+      GTextOverflowModeWordWrap, GTextAlignmentLeft);
+  int qh = qsize.h < 42 ? qsize.h : 42;
+  y += qh + 4;
+
+  // Separator
+  graphics_context_set_stroke_color(ctx, GColorDarkGray);
+  graphics_draw_line(ctx, GPoint(8, y), GPoint(136, y));
+  y += 3;
+
+  // Options (compact: 20px per option)
+  for (int i = 0; i < s_question_count; i++) {
+    bool selected = (i == s_question_selected);
+    bool is_other = (s_question_nums[i] == 0);
+
+    if (selected) {
+      graphics_context_set_fill_color(ctx, GColorDarkGreen);
+      graphics_fill_rect(ctx, GRect(2, y, bounds.size.w - 4, 18), 2, GCornersAll);
+      graphics_context_set_text_color(ctx, GColorWhite);
+    } else if (is_other) {
+      graphics_context_set_text_color(ctx, GColorYellow);
+    } else {
+      graphics_context_set_text_color(ctx, GColorLightGray);
+    }
+
+    // Arrow indicator for selected
+    char line[56];
+    snprintf(line, sizeof(line), "%s%s", selected ? "> " : "  ", s_question_opts[i]);
+    graphics_draw_text(ctx, line, opt_font,
+        GRect(4, y, bounds.size.w - 8, 18),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += 20;
+  }
+}
+
 static void canvas_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
+
+  // Question mode (full screen)
+  if (s_state == STATE_QUESTION) {
+    // Hide CLEAN layers
+    if (s_clean_clip_layer) {
+      layer_set_hidden(s_clean_clip_layer, true);
+      layer_set_hidden(text_layer_get_layer(s_clean_claude_layer), true);
+      layer_set_hidden(text_layer_get_layer(s_clean_command_layer), true);
+      layer_set_hidden(text_layer_get_layer(s_clean_prompt_layer), true);
+      layer_set_hidden(text_layer_get_layer(s_clean_status_layer), true);
+    }
+    draw_question(ctx, bounds);
+    return;
+  }
 
   // Menu mode
   if (s_state == STATE_MENU) {
@@ -1347,12 +1470,20 @@ static void inbox_received_callback(DictionaryIterator *iterator,
           strncpy(s_prev_suggestion, s_suggestion, sizeof(s_prev_suggestion) - 1);
         }
       }
-      // Vibrate on question (QUESTION: status)
-      if (strncmp(s_status, "QUESTION:", 9) == 0) {
-        if (strncmp(s_prev_clean_status, "QUESTION:", 9) != 0) {
-          // New question - double vibrate
-          vibes_double_pulse();
+      // Detect AskUserQuestion -> full-screen STATE_QUESTION
+      if (strcmp(s_status, "QUESTION") == 0) {
+        parse_question_from_clean();
+        if (s_question_count > 0) {
+          if (s_state != STATE_QUESTION) {
+            vibes_double_pulse(); // New question
+          }
+          s_state = STATE_QUESTION;
+          layer_mark_dirty(s_canvas);
+          return;
         }
+      } else if (s_state == STATE_QUESTION) {
+        // Question dismissed -> back to session
+        s_state = STATE_SESSION;
       }
       // Mark dirty - blink_tick will handle animations/history
       s_clean_dirty = true;
@@ -1529,6 +1660,12 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
       s_selected_idx--;
       layer_mark_dirty(s_canvas);
     }
+    return;
+  }
+  if (s_state == STATE_QUESTION) {
+    if (s_question_selected > 0) s_question_selected--;
+    layer_mark_dirty(s_canvas);
+    vibes_short_pulse();
     return;
   }
   if (s_has_prompt) {
@@ -1713,6 +1850,27 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     }
     return;
   }
+  if (s_state == STATE_QUESTION) {
+    if (s_question_nums[s_question_selected] == 0) {
+      // "Other (speak)" - trigger dictation
+      s_state = STATE_SESSION;
+      layer_mark_dirty(s_canvas);
+      if (s_dictation_session && !s_in_dictation) {
+        s_in_dictation = true;
+        s_dictation_pending[0] = '\0';
+        vibes_short_pulse();
+        app_timer_register(50, dictation_send_pause, (void *)0);
+      }
+    } else {
+      // Send option number
+      send_key(s_question_nums[s_question_selected]);
+      trigger_glitch_short();
+      vibes_short_pulse();
+      s_state = STATE_SESSION;
+      layer_mark_dirty(s_canvas);
+    }
+    return;
+  }
   if (s_has_prompt) {
     send_key(s_prompt_keys[1]);
     trigger_glitch_short();
@@ -1739,6 +1897,12 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
       s_selected_idx++;
       layer_mark_dirty(s_canvas);
     }
+    return;
+  }
+  if (s_state == STATE_QUESTION) {
+    if (s_question_selected < s_question_count - 1) s_question_selected++;
+    layer_mark_dirty(s_canvas);
+    vibes_short_pulse();
     return;
   }
   if (s_has_prompt) {

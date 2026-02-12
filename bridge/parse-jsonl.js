@@ -181,6 +181,21 @@ function extractCleanData(events) {
             if (block.type === 'tool_use') {
                 result.lastTool = formatToolUse(block.name, block.input);
 
+                // Detect AskUserQuestion - extract question + options
+                if (block.name === 'AskUserQuestion' && block.input?.questions) {
+                    const q = block.input.questions[0];
+                    if (q) {
+                        const opts = (q.options || []).slice(0, 4).map((o, i) => ({
+                            num: i + 1,
+                            label: (o.label || '').substring(0, 20)
+                        }));
+                        result.askUserQuestion = {
+                            question: q.question || '',
+                            options: opts
+                        };
+                    }
+                }
+
                 // Only mark running if the latest stop_reason indicates tool_use or streaming
                 const isRunningTurn = !doneTurn &&
                     (latestStopReason === 'tool_use' || latestStopReason === null || latestStopReason === undefined);
@@ -267,6 +282,10 @@ function formatToolUse(name, input) {
             return `Grep "${input?.pattern || ''}"`;
         case 'Task':
             return `Task: ${input?.description || ''}`;
+        case 'TaskCreate':
+            return `Task: ${input?.subject || ''}`;
+        case 'TaskUpdate':
+            return `Task: ${input?.status || ''} ${input?.subject || ''}`;
         default:
             return name;
     }
@@ -289,6 +308,10 @@ function getTaskFromTool(name, input) {
             return 'Writing file...';
         case 'Task':
             return input?.description || 'Running task...';
+        case 'TaskCreate':
+            return input?.activeForm || input?.subject || 'Creating task...';
+        case 'TaskUpdate':
+            return input?.activeForm || 'Updating task...';
         default:
             return `${name}...`;
     }

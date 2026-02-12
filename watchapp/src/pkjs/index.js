@@ -128,15 +128,36 @@ Pebble.addEventListener('ready', function () {
                 // Truncate fields to fit in 2048-byte AppMessage inbox (~2000 usable)
                 var uCmd = sanitizePreserveNewlines(cd.userCmd).substring(0, 80);
                 var uSum = sanitizePreserveNewlines(cd.summary).substring(0, 400);
-                var uStat = sanitizePreserveNewlines(cd.status).substring(0, 20);
+                var rawStat = sanitizePreserveNewlines(cd.status);
+                // QUESTION: status needs full option labels; normal status stays short
+                var uStat = rawStat.indexOf("QUESTION:") === 0 ? rawStat.substring(0, 200) : rawStat.substring(0, 20);
                 var uTool = sanitizePreserveNewlines(cd.lastTool).substring(0, 100);
                 var uSug = sanitizePreserveNewlines(cd.suggestion).substring(0, 80);
                 var uTask = sanitizePreserveNewlines(cd.activeTask).substring(0, 80);
-                var uDiff = sanitizePreserveNewlines(cd.diff).substring(0, 200);
+                var uDiff = sanitizePreserveNewlines(cd.diff).substring(0, 10);
                 var cleanStr = "CLEAN:" + uCmd + "|" + uSum + "|" + uStat + "|" + uTool + "|" + uSug + "|" + uTask + "|" + uDiff;
                 // Final safety: hard cap at 1950 bytes
                 if (cleanStr.length > 1000) cleanStr = cleanStr.substring(0, 1000);
-                queue.push({ "TERMINAL_DATA": cleanStr });
+                var cleanPayload = { "TERMINAL_DATA": cleanStr };
+                // Attach prompt to CLEAN payload too (not just verbose)
+                if (msg.prompt && msg.prompt.options) {
+                    var opts = msg.prompt.options;
+                    cleanPayload["PROMPT_FLAG"] = 1;
+                    var pParts = [];
+                    var pNums = [];
+                    if (opts.length === 2) {
+                        pParts.push("^ " + opts[0].label);
+                        pParts.push("v " + opts[1].label);
+                        pNums = [opts[0].num, 0, opts[1].num];
+                    } else {
+                        pParts.push("^ " + opts[0].label);
+                        if (opts[1]) pParts.push("o " + opts[1].label);
+                        if (opts[2]) pParts.push("v " + opts[2].label);
+                        pNums = [opts[0].num, opts[1] ? opts[1].num : 0, opts[2] ? opts[2].num : 0];
+                    }
+                    cleanPayload["PROMPT_TEXT"] = pNums.join(",") + "|" + pParts.join("  ");
+                }
+                queue.push(cleanPayload);
             }
             trySend();
         }

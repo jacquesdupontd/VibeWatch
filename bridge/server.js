@@ -212,6 +212,38 @@ function detectPrompt(raw) {
         return { options: mapped };
     }
 
+    // AskUserQuestion detection: numbered options with ANY text (not just Yes/No)
+    // Claude Code shows: "? Question text\n  1. Option A\n  2. Option B\n  ..."
+    const askOptions = [];
+    const askRegex = /(\d+)\.\s+([^\n\d][^\n]*)/g;
+    let askMatch;
+    while ((askMatch = askRegex.exec(cleaned)) !== null) {
+        const num = parseInt(askMatch[1]);
+        let text = askMatch[2].trim();
+        // Skip if it looks like a file path or code line
+        if (text.includes('/') && text.includes('.')) continue;
+        // Clean up
+        text = text.replace(/\s*\[.*\].*$/, '').replace(/\s*>.*$/, '').trim();
+        if (text.length > 1 && text.length < 50 && !askOptions.find(o => o.num === num)) {
+            askOptions.push({ num, text });
+        }
+    }
+    askOptions.sort((a, b) => a.num - b.num);
+    // Must have sequential numbers starting from 1
+    if (askOptions.length >= 2 && askOptions[0].num === 1) {
+        // Extract question text (line before "1.")
+        let question = '';
+        const qMatch = cleaned.match(/\?\s*([^\n]+)\s*\n/);
+        if (qMatch) question = qMatch[1].trim();
+
+        const mapped = askOptions.slice(0, 4).map(o => {
+            let label = o.text;
+            if (label.length > 20) label = label.substring(0, 20);
+            return { num: o.num, label };
+        });
+        return { question, options: mapped, isAskUser: true };
+    }
+
     // Fallback detection
     if (/Do you want/.test(cleaned) && /Yes/.test(cleaned) && /No/.test(cleaned)) {
         return { options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] };
@@ -623,6 +655,15 @@ function extractRealtimeStatus(raw) {
     for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
         const line = lines[i].trim();
         if (!line) continue;
+
+        // Pattern 0: Task spinner "· Something something... (Ns" (activeForm from TaskCreate)
+        const spinnerMatch = line.match(/[·✳✶✽*⏺]\s+(.+?)(\.{3}|…)\s*\(\d+[ms]/);
+        if (spinnerMatch) {
+            const taskName = spinnerMatch[1].trim();
+            if (taskName.length > 2 && taskName.length < 50) {
+                return taskName + '...';
+            }
+        }
 
         // Pattern 1: Any "Word..." or "Word-word…" (thinking indicator, supports hyphens)
         const thinkMatch = line.match(/[·✳✶✽*]?\s*([A-Z][a-z]+(?:-[a-z]+)*)(\.{3}|…)/);
@@ -1132,6 +1173,23 @@ wss.on('connection', (ws) => {
                         activeTask: cleanData.activeTask || ''
                     };
 
+                    // AskUserQuestion from JSONL - override prompt
+                    const rawClean = extractCleanData(events);
+                    if (rawClean.askUserQuestion) {
+                        const auq = rawClean.askUserQuestion;
+                        if (auq && auq.options.length >= 2) {
+                            const mapped = auq.options.map(o => ({
+                                num: o.num, label: o.label
+                            }));
+                            cleanData.prompt = { options: mapped, isAskUser: true, question: auq.question };
+                            // Encode question + options in summary (newline-delimited for reliable parsing)
+                            const optLines = mapped.map(o => 'OPT:' + o.label);
+                            cleanData.summary = '?' + auq.question + '\n' + optLines.join('\n');
+                            cleanData.status = 'QUESTION';
+                            console.log('[ASK_USER] From JSONL:', JSON.stringify(auq));
+                        }
+                    }
+
                     // Capture terminal ONLY for thinking word (status) and interactive prompts
                     try {
                         const startLines = deepCaptureTicks > 0 ? -800 : -200;
@@ -1141,7 +1199,7 @@ wss.on('connection', (ws) => {
                             { encoding: 'utf8', timeout: 1000 }
                         );
                         const realtimeStatus = extractRealtimeStatus(raw);
-                        if (realtimeStatus) {
+                        if (realtimeStatus && cleanData.status !== 'QUESTION') {
                             cleanData.status = realtimeStatus;
                             console.log('[REALTIME STATUS]', realtimeStatus);
                         }
@@ -1150,12 +1208,19 @@ wss.on('connection', (ws) => {
                         const prompt = detectPrompt(recentLines);
                         if (prompt) {
                             cleanData.prompt = prompt;
-                            const parts = prompt.options.map(o => {
-                                if (o === prompt.options[0]) return '^ ' + o.label;
-                                if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
-                                return 'o ' + o.label;
-                            });
-                            cleanData.status = 'QUESTION:' + parts.join('  ');
+                            if (prompt.isAskUser && prompt.question) {
+                                // Encode question + options in summary for full-screen watch display
+                                const optLines = prompt.options.map(o => 'OPT:' + o.label);
+                                cleanData.summary = '?' + prompt.question + '\n' + optLines.join('\n');
+                                cleanData.status = 'QUESTION';
+                            } else {
+                                const parts = prompt.options.map(o => {
+                                    if (o === prompt.options[0]) return '^ ' + o.label;
+                                    if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
+                                    return 'o ' + o.label;
+                                });
+                                cleanData.status = 'QUESTION:' + parts.join('  ');
+                            }
                             console.log('[PROMPT] Detected:', JSON.stringify(prompt));
                         }
                         const sug = detectSuggestionFromTmux(raw);
@@ -1211,12 +1276,18 @@ wss.on('connection', (ws) => {
                         const prompt = detectPrompt(recentLines2);
                         if (prompt) {
                             cleanData.prompt = prompt;
-                            const parts = prompt.options.map(o => {
-                                if (o === prompt.options[0]) return '^ ' + o.label;
-                                if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
-                                return 'o ' + o.label;
-                            });
-                            cleanData.status = 'QUESTION:' + parts.join('  ');
+                            if (prompt.isAskUser && prompt.question) {
+                                const optLines = prompt.options.map(o => 'OPT:' + o.label);
+                                cleanData.summary = '?' + prompt.question + '\n' + optLines.join('\n');
+                                cleanData.status = 'QUESTION';
+                            } else {
+                                const parts = prompt.options.map(o => {
+                                    if (o === prompt.options[0]) return '^ ' + o.label;
+                                    if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
+                                    return 'o ' + o.label;
+                                });
+                                cleanData.status = 'QUESTION:' + parts.join('  ');
+                            }
                         }
 
                         // Detect suggestion
