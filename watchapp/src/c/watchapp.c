@@ -42,7 +42,7 @@ static char s_active_session[32] = "";
 
 // Display mode: VERBOSE (streaming) vs CLEAN (structured)
 typedef enum { MODE_VERBOSE, MODE_CLEAN } DisplayMode;
-static DisplayMode s_display_mode = MODE_VERBOSE;
+static DisplayMode s_display_mode = MODE_CLEAN;
 static char s_user_cmd[128] = "";
 static char s_claude_summary[1024] =
     ""; // Larger buffer for multiple paragraphs
@@ -60,17 +60,24 @@ static char s_prev_clean_status[32] = "Ready";
 static char s_command_marquee_buf[600] = "";
 static char s_prompt_marquee_buf[600] = "";
 static char s_status_marquee_buf[600] = "";
-static char s_claude_marquee_buf[2100] = ""; // 1024 * 2 + small separator
+static char s_claude_marquee_buf[1100] = ""; // 512 * 2 + small separator
 static int s_clean_scroll = -1;  // -1 = auto (show end), >=0 = manual offset
 static int s_marquee_offset = 0; // For horizontal marquee (commands)
 
+// Layout Y positions (computed from actual screen bounds in create_clean_layers)
+static int16_t s_ly_claude_h = 111;  // Claude text zone height
+static int16_t s_ly_cmd_y = 111;     // Command row Y
+static int16_t s_ly_sep_y = 127;     // Separator Y
+static int16_t s_ly_prompt_y = 129;  // Prompt row Y
+static int16_t s_ly_status_y = 150;  // Status bar Y
+
 // CLEAN history (no auto-scroll): navigate blocks with UP/DOWN
-#define CLEAN_HISTORY_MAX 12
+#define CLEAN_HISTORY_MAX 4
 static char s_clean_history[CLEAN_HISTORY_MAX][1024];
 static int s_clean_hist_count = 0;
 static int s_clean_hist_index = -1;
 static char s_clean_scroll_src[1024] = "";
-static char s_diff_buffer[2048] = "";
+static char s_diff_buffer[512] = "";
 static int s_diff_chars_shown = 0;
 static int s_diff_chars_total = 0;
 static AppTimer *s_diff_stream_timer = NULL;
@@ -98,12 +105,21 @@ static int s_glitch_frames = 0;
 static int s_flash_frames = 0;
 static AppTimer *s_fx_timer = NULL;
 
+// Dictation (voice input)
+static DictationSession *s_dictation_session = NULL;
+static bool s_in_dictation = false;
+static char s_dictation_pending[200] = "";
+static Window *s_dictation_window = NULL;
+
 static GFont s_font;
 static int s_line_h = 0;
 static int s_space_w = 0;
 static int s_page_step = 168;
 
-// Forward declarations for animation functions
+// Forward declarations
+static void send_msg(const char *msg);
+static void start_dictation_deferred(void *data);
+static void dictation_send_pause(void *data);
 static void start_command_marquee();
 static void start_prompt_marquee();
 static void start_status_marquee();
@@ -132,7 +148,7 @@ static void clean_show_history_index(int idx) {
 
   // Measure to decide if we should auto-scroll (long blocks)
   GSize size = text_layer_get_content_size(s_clean_claude_layer);
-  bool too_long = (size.h > (10 * 14)); // >10 lines
+  bool too_long = (size.h > (s_ly_claude_h - 14)); // > visible zone
 
   // Stop any existing scroll
   if (s_claude_scroll_anim) {
@@ -147,11 +163,11 @@ static void clean_show_history_index(int idx) {
     start_claude_scroll();
   } else {
     s_auto_scroll_enabled = false;
-    int h = size.h < 111 ? 111 : size.h;
+    int h = size.h < s_ly_claude_h ? s_ly_claude_h : size.h;
     // Always show the END of the text when not scrolling
     int y = 0;
-    if (size.h > 111) {
-      y = 111 - size.h; // negative offset so bottom lines are visible
+    if (size.h > s_ly_claude_h) {
+      y = s_ly_claude_h - size.h; // negative offset so bottom lines are visible
     }
     layer_set_frame(text_layer_get_layer(s_clean_claude_layer),
                     GRect(4, y, 136, h));
@@ -617,14 +633,14 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     }
 
     // CLIP BARS - cache le débordement du texte Claude
-    graphics_fill_rect(ctx, GRect(0, 111, 144, 17), 0,
+    graphics_fill_rect(ctx, GRect(0, s_ly_cmd_y, 144, 17), 0,
                        GCornerNone); // Bar au-dessus command
-    graphics_fill_rect(ctx, GRect(0, 145, 144, 5), 0,
+    graphics_fill_rect(ctx, GRect(0, s_ly_prompt_y + 16, 144, 5), 0,
                        GCornerNone); // Bar au-dessus status
 
     // SEPARATOR LINE
     graphics_context_set_stroke_color(ctx, GColorDarkGray);
-    graphics_draw_line(ctx, GPoint(10, 127), GPoint(134, 127));
+    graphics_draw_line(ctx, GPoint(10, s_ly_sep_y), GPoint(134, s_ly_sep_y));
 
     // Show CLEAN layers
     if (s_clean_clip_layer) {
@@ -729,17 +745,14 @@ static void start_claude_scroll() {
   GSize single_size = text_layer_get_content_size(s_clean_claude_layer);
   int cycle_H = single_size.h + 14; // small gap for seamless loop
 
-  // Duplicate for continuous scroll (no pause)
-  snprintf(s_claude_marquee_buf, sizeof(s_claude_marquee_buf), "%s\n\n%s",
+  // Duplicate with separator for continuous scroll
+  snprintf(s_claude_marquee_buf, sizeof(s_claude_marquee_buf),
+           "%s\n- - - - - - - - - -\n%s",
            s_clean_scroll_src, s_clean_scroll_src);
   text_layer_set_text(s_clean_claude_layer, s_claude_marquee_buf);
 
-  // Start from the END (latest lines) so important part is visible first
-  int start_y = 0;
-  if (single_size.h > 111) {
-    start_y = -(single_size.h - 111);
-  }
-  GRect start_frame = GRect(4, start_y, 136, 4000);
+  // Start from the BEGINNING so user reads from top
+  GRect start_frame = GRect(4, 0, 136, 4000);
 
   // Animation: scroll upwards (text goes UP, Y becomes more negative)
   GRect finish_frame = start_frame;
@@ -781,7 +794,7 @@ static void command_marquee_stopped(Animation *animation, bool finished,
   // Reset position to start for seamless loop
   if (finished && s_clean_command_layer && s_last_tool[0]) {
     layer_set_frame(text_layer_get_layer(s_clean_command_layer),
-                    GRect(4, 111, 600, 16));
+                    GRect(4, s_ly_cmd_y, 600, 16));
     start_command_marquee();
   }
 }
@@ -796,7 +809,7 @@ static void prompt_marquee_stopped(Animation *animation, bool finished,
   // Reset position to start for seamless loop
   if (finished && s_clean_prompt_layer && (s_user_cmd[0] || s_suggestion[0])) {
     layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
-                    GRect(4, 129, 600, 16));
+                    GRect(4, s_ly_prompt_y, 600, 16));
     start_prompt_marquee();
   }
 }
@@ -833,10 +846,10 @@ static void start_command_marquee() {
 
     // Ensure layer is wide enough to hold both copies without wrapping
     layer_set_frame(text_layer_get_layer(s_clean_command_layer),
-                    GRect(4, 111, 2000, 16));
+                    GRect(4, s_ly_cmd_y, 2000, 16));
 
-    GRect start = GRect(4, 111, 2000, 16);
-    GRect finish = GRect(4 - one_cycle_width, 111, 2000, 16);
+    GRect start = GRect(4, s_ly_cmd_y, 2000, 16);
+    GRect finish = GRect(4 - one_cycle_width, s_ly_cmd_y, 2000, 16);
 
     s_command_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_command_layer), &start, &finish);
@@ -852,7 +865,7 @@ static void start_command_marquee() {
     // Text is short - show original
     text_layer_set_text(s_clean_command_layer, s_last_tool);
     layer_set_frame(text_layer_get_layer(s_clean_command_layer),
-                    GRect(4, 111, 136, 16));
+                    GRect(4, s_ly_cmd_y, 136, 16));
   }
 }
 
@@ -886,10 +899,10 @@ static void start_prompt_marquee() {
     text_layer_set_text(s_clean_prompt_layer, s_prompt_marquee_buf);
 
     layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
-                    GRect(4, 129, 2000, 16));
+                    GRect(4, s_ly_prompt_y, 2000, 16));
 
-    GRect start = GRect(4, 129, 2000, 16);
-    GRect finish = GRect(4 - one_cycle_width, 129, 2000, 16);
+    GRect start = GRect(4, s_ly_prompt_y, 2000, 16);
+    GRect finish = GRect(4 - one_cycle_width, s_ly_prompt_y, 2000, 16);
 
     s_prompt_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_prompt_layer), &start, &finish);
@@ -903,7 +916,7 @@ static void start_prompt_marquee() {
   } else {
     text_layer_set_text(s_clean_prompt_layer, text);
     layer_set_frame(text_layer_get_layer(s_clean_prompt_layer),
-                    GRect(4, 129, 136, 16));
+                    GRect(4, s_ly_prompt_y, 136, 16));
   }
 }
 
@@ -956,10 +969,10 @@ static void start_status_marquee() {
     text_layer_set_text(s_clean_status_layer, s_status_marquee_buf);
 
     layer_set_frame(text_layer_get_layer(s_clean_status_layer),
-                    GRect(0, 150, 2000, 18));
+                    GRect(0, s_ly_status_y, 2000, 18));
 
-    GRect start = GRect(0, 150, 2000, 18);
-    GRect finish = GRect(-one_cycle_width, 150, 2000, 18);
+    GRect start = GRect(0, s_ly_status_y, 2000, 18);
+    GRect finish = GRect(-one_cycle_width, s_ly_status_y, 2000, 18);
 
     s_status_marquee_anim = property_animation_create_layer_frame(
         text_layer_get_layer(s_clean_status_layer), &start, &finish);
@@ -974,7 +987,7 @@ static void start_status_marquee() {
     text_layer_set_text(s_clean_status_layer, text);
     text_layer_set_text_alignment(s_clean_status_layer, GTextAlignmentCenter);
     layer_set_frame(text_layer_get_layer(s_clean_status_layer),
-                    GRect(0, 150, 144, 18));
+                    GRect(0, s_ly_status_y, 144, 18));
   }
 }
 
@@ -1042,6 +1055,9 @@ static void blink_tick(void *data) {
   if (s_anim_counter >= 1000)
     s_anim_counter = 0;
 
+  // Keep backlight on (every ~3s)
+  if (s_anim_counter % 12 == 0) light_enable_interaction();
+
   // Dynamic UI update (blinking status/prompt)
   update_clean_ui_state();
 
@@ -1096,6 +1112,9 @@ static void diff_burst_tick(void *data) {
 
 static void inbox_received_callback(DictionaryIterator *iterator,
                                     void *context) {
+  // Drop all messages during dictation
+  if (s_in_dictation) return;
+
   bool needs_redraw = false;
 
   Tuple *t = dict_find(iterator, MESSAGE_KEY_TERMINAL_DATA);
@@ -1217,7 +1236,11 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       }
 
       if (s_clean_claude_layer) {
-        text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+        // Only set text directly if no scroll animation is running
+        // (scroll uses s_claude_marquee_buf which would be overwritten)
+        if (!s_claude_scroll_anim) {
+          text_layer_set_text(s_clean_claude_layer, s_claude_summary);
+        }
         layer_set_hidden(text_layer_get_layer(s_clean_claude_layer),
                          s_claude_summary[0] == '\0');
       }
@@ -1495,6 +1518,91 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *ctx) {
     layer_mark_dirty(s_canvas);
   }
 }
+// Delayed restart of timers/animations after dictation system cleanup
+// Timer: start dictation after bridge is paused
+static void start_dictation_deferred(void *data) {
+  // Kill all timers and animations NOW (right before dictation)
+  if (s_cursor_timer) { app_timer_cancel(s_cursor_timer); s_cursor_timer = NULL; }
+  if (s_stream_timer) { app_timer_cancel(s_stream_timer); s_stream_timer = NULL; }
+  if (s_diff_stream_timer) { app_timer_cancel(s_diff_stream_timer); s_diff_stream_timer = NULL; }
+  if (s_diff_burst_timer) { app_timer_cancel(s_diff_burst_timer); s_diff_burst_timer = NULL; }
+  if (s_fx_timer) { app_timer_cancel(s_fx_timer); s_fx_timer = NULL; }
+  if (s_claude_scroll_anim) { property_animation_destroy(s_claude_scroll_anim); s_claude_scroll_anim = NULL; }
+  if (s_command_marquee_anim) { property_animation_destroy(s_command_marquee_anim); s_command_marquee_anim = NULL; }
+  if (s_prompt_marquee_anim) { property_animation_destroy(s_prompt_marquee_anim); s_prompt_marquee_anim = NULL; }
+  if (s_status_marquee_anim) { property_animation_destroy(s_status_marquee_anim); s_status_marquee_anim = NULL; }
+  free(malloc(2048)); // Bobby's memory trick
+  APP_LOG(APP_LOG_LEVEL_INFO, "Starting dictation (heap: %d)", (int)heap_bytes_free());
+  s_dictation_window = window_create();
+  window_set_background_color(s_dictation_window, GColorBlack);
+  window_stack_push(s_dictation_window, false);
+  dictation_session_start(s_dictation_session);
+}
+
+// Timer: send resume after dictation text was sent
+static void post_dictation_resume(void *data) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Sending resume");
+  send_msg("resume");
+  // Restart cursor timer (killed before dictation)
+  if (!s_cursor_timer) {
+    s_cursor_timer = app_timer_register(250, blink_tick, NULL);
+  }
+}
+
+// Timer: send dictation text, then schedule resume
+static void post_dictation_send(void *data) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Post-dictation send");
+  if (s_dictation_pending[0]) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "Sending: %s", s_dictation_pending);
+    send_msg(s_dictation_pending);
+    s_dictation_pending[0] = '\0';
+    // Wait for outbox to clear before sending resume
+    app_timer_register(500, post_dictation_resume, NULL);
+  } else {
+    // No text, just resume immediately
+    send_msg("resume");
+    if (!s_cursor_timer) {
+      s_cursor_timer = app_timer_register(250, blink_tick, NULL);
+    }
+  }
+}
+
+// Strip non-ASCII from dictation text (Pebble only supports basic ASCII)
+static void sanitize_ascii(char *dst, const char *src, size_t maxlen) {
+  size_t j = 0;
+  for (size_t i = 0; src[i] && j < maxlen - 1; i++) {
+    unsigned char c = (unsigned char)src[i];
+    if (c >= 0x20 && c <= 0x7E) {
+      dst[j++] = (char)c; // Printable ASCII
+    } else if (c == '\n' || c == '\r') {
+      dst[j++] = ' '; // Newlines become spaces
+    }
+    // Skip all non-ASCII bytes (accents, emojis, etc.)
+  }
+  dst[j] = '\0';
+}
+
+// Dictation callback - store text, schedule deferred send
+// Bridge is paused so BT is quiet -> timers should work
+static void dictation_callback(DictationSession *session,
+                                DictationSessionStatus status,
+                                char *transcription, void *context) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Dictation cb status=%d", (int)status);
+  if (status == DictationSessionStatusSuccess && transcription && transcription[0]) {
+    sanitize_ascii(s_dictation_pending, transcription, sizeof(s_dictation_pending));
+    APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_dictation_pending);
+  }
+  // Pop blank window back to main
+  if (s_dictation_window) {
+    window_stack_pop(false);
+    window_destroy(s_dictation_window);
+    s_dictation_window = NULL;
+  }
+  s_in_dictation = false;
+  // Send text + resume after 500ms (let system settle)
+  app_timer_register(500, post_dictation_send, NULL);
+}
+
 static void select_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_state == STATE_MENU) {
     if (s_session_count > 0) {
@@ -1610,13 +1718,36 @@ static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
     layer_mark_dirty(s_canvas);
   }
 }
+// Timer: try to send pause, then schedule dictation
+static void dictation_send_pause(void *data) {
+  int retries = (int)(intptr_t)data;
+  DictionaryIterator *iter;
+  AppMessageResult res = app_message_outbox_begin(&iter);
+  if (res == APP_MSG_OK && iter) {
+    dict_write_cstring(iter, MESSAGE_KEY_TERMINAL_DATA, "pause");
+    app_message_outbox_send();
+    APP_LOG(APP_LOG_LEVEL_INFO, "Pause sent, dictation in 1.5s");
+    app_timer_register(1500, start_dictation_deferred, NULL);
+  } else if (retries < 10) {
+    // Outbox busy, retry in 100ms
+    app_timer_register(100, dictation_send_pause, (void *)(intptr_t)(retries + 1));
+  } else {
+    // Give up on pause, start dictation anyway
+    APP_LOG(APP_LOG_LEVEL_INFO, "Pause failed, starting dictation anyway");
+    app_timer_register(500, start_dictation_deferred, NULL);
+  }
+}
+
 static void select_long_handler(ClickRecognizerRef recognizer, void *ctx) {
   if (s_state == STATE_SESSION) {
-    s_state = STATE_MENU;
-    send_msg("leave");
-    send_msg("list");
-    layer_mark_dirty(s_canvas);
-    vibes_short_pulse();
+    if (s_dictation_session && !s_in_dictation) {
+      s_in_dictation = true;
+      s_dictation_pending[0] = '\0';
+      APP_LOG(APP_LOG_LEVEL_INFO, "Dictation requested");
+      vibes_short_pulse();
+      // Try to send pause to bridge, then start dictation
+      app_timer_register(50, dictation_send_pause, (void *)0);
+    }
   }
 }
 
@@ -1635,21 +1766,29 @@ static void create_clean_layers() {
     return; // Already created
 
   Layer *root = window_get_root_layer(s_window);
+  GRect bounds = layer_get_bounds(root);
+  int H = bounds.size.h;
+  int W = bounds.size.w;
 
-  // LAYOUT CALCUL PIXEL PARFAIT (écran 144x168):
+  // LAYOUT PIXEL PARFAIT (écran 144x168):
   // Status:    18px @ y:150-168
-  // Prompt:    16px @ y:129-145 (3px up from 132)
+  // Prompt:    16px @ y:129-145
   // Separator: 2px  @ y:127-129
   // Command:   16px @ y:111-127
-  // Claude:    111px @ y:0-111 (zone visible)
+  // Claude:    111px @ y:0-111
+  s_ly_status_y = H - 18;
+  s_ly_prompt_y = s_ly_status_y - 5 - 16;
+  s_ly_sep_y = s_ly_prompt_y - 2;
+  s_ly_cmd_y = s_ly_sep_y - 16;
+  s_ly_claude_h = s_ly_cmd_y;
 
-  // CLIPPING LAYER - 111px pour contenir et clipper le texte Claude
-  s_clean_clip_layer = layer_create(GRect(0, 0, 144, 111));
+  // CLIPPING LAYER - pour contenir et clipper le texte Claude
+  s_clean_clip_layer = layer_create(GRect(0, 0, W, s_ly_claude_h));
   layer_set_clips(s_clean_clip_layer, true); // ACTIVER CLIPPING
   layer_add_child(root, s_clean_clip_layer);
 
   // Claude text layer - GRANDE (2000px) pour scroll, DANS le clip layer
-  s_clean_claude_layer = text_layer_create(GRect(4, 0, 136, 2000));
+  s_clean_claude_layer = text_layer_create(GRect(4, 0, W - 8, 2000));
   text_layer_set_background_color(s_clean_claude_layer,
                                   GColorClear); // Transparent
   text_layer_set_text_color(
@@ -1662,7 +1801,7 @@ static void create_clean_layers() {
                   text_layer_get_layer(s_clean_claude_layer));
 
   // Command layer - cyan, 600px large pour marquee scroll
-  s_clean_command_layer = text_layer_create(GRect(4, 111, 600, 16));
+  s_clean_command_layer = text_layer_create(GRect(4, s_ly_cmd_y, 600, 16));
   text_layer_set_background_color(s_clean_command_layer, GColorBlack);
   text_layer_set_text_color(s_clean_command_layer, GColorCyan);
   text_layer_set_font(s_clean_command_layer,
@@ -1672,7 +1811,7 @@ static void create_clean_layers() {
   layer_add_child(root, text_layer_get_layer(s_clean_command_layer));
 
   // Prompt layer - blanc/jaune, 600px pour marquee scroll
-  s_clean_prompt_layer = text_layer_create(GRect(4, 129, 600, 16));
+  s_clean_prompt_layer = text_layer_create(GRect(4, s_ly_prompt_y, 600, 16));
   text_layer_set_background_color(s_clean_prompt_layer, GColorBlack);
   text_layer_set_text_color(s_clean_prompt_layer, GColorWhite);
   text_layer_set_font(s_clean_prompt_layer,
@@ -1682,7 +1821,7 @@ static void create_clean_layers() {
   layer_add_child(root, text_layer_get_layer(s_clean_prompt_layer));
 
   // Status layer - 600px large pour marquee infini des tâches
-  s_clean_status_layer = text_layer_create(GRect(0, 150, 600, 18));
+  s_clean_status_layer = text_layer_create(GRect(0, s_ly_status_y, 600, 18));
   text_layer_set_background_color(s_clean_status_layer, GColorDarkGray);
   text_layer_set_text_color(s_clean_status_layer, GColorWhite);
   text_layer_set_font(s_clean_status_layer,
@@ -1783,6 +1922,8 @@ static void window_load(Window *window) {
   s_fx_layer = layer_create(bounds);
   layer_set_update_proc(s_fx_layer, fx_update);
   layer_add_child(wl, s_fx_layer);
+
+  // Dictation ready (triggered by long-press SELECT during session)
 }
 
 static void window_unload(Window *window) {
@@ -1806,6 +1947,7 @@ static void window_unload(Window *window) {
 }
 
 static void init() {
+  light_enable(true); // Force backlight ON
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, click_config_provider);
@@ -1814,10 +1956,21 @@ static void init() {
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_outbox_sent(NULL);
   app_message_register_outbox_failed(NULL);
-  app_message_open(4096, 512);
+  app_message_open(2048, 512);
+  // Dictation session for voice input
+  // Buffer size 0 = dynamic allocation (like Bobby does)
+  s_dictation_session = dictation_session_create(0, dictation_callback, NULL);
+  // Skip confirmation screen (like Bobby) - go straight from speech to callback
+  if (s_dictation_session) {
+    dictation_session_enable_confirmation(s_dictation_session, false);
+  }
+  APP_LOG(APP_LOG_LEVEL_INFO, "Dictation session: %p", s_dictation_session);
   window_stack_push(s_window, true);
 }
-static void deinit() { window_destroy(s_window); }
+static void deinit() {
+  if (s_dictation_session) dictation_session_destroy(s_dictation_session);
+  window_destroy(s_window);
+}
 int main() {
   init();
   app_event_loop();

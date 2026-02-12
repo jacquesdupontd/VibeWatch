@@ -226,6 +226,15 @@ function extractCleanData(events) {
                             break;
                         }
                     }
+                    // User answered Claude's AskUserQuestion
+                    if (block.type === 'tool_result' && typeof block.content === 'string' &&
+                        block.content.startsWith('User has answered')) {
+                        const match = block.content.match(/="([^"]+)"/);
+                        if (match) {
+                            result.userCmd = match[1];
+                            break;
+                        }
+                    }
                 }
             }
             if (result.userCmd) break;

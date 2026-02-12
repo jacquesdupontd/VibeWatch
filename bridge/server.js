@@ -624,8 +624,8 @@ function extractRealtimeStatus(raw) {
         const line = lines[i].trim();
         if (!line) continue;
 
-        // Pattern 1: Any "Word..." or "Word…" (thinking indicator)
-        const thinkMatch = line.match(/[·✳✶✽*]?\s*([A-Z][a-z]+)(\.{3}|…)/);
+        // Pattern 1: Any "Word..." or "Word-word…" (thinking indicator, supports hyphens)
+        const thinkMatch = line.match(/[·✳✶✽*]?\s*([A-Z][a-z]+(?:-[a-z]+)*)(\.{3}|…)/);
         if (thinkMatch) {
             const word = thinkMatch[1];
             // Skip task words (handled separately)
@@ -1145,10 +1145,11 @@ wss.on('connection', (ws) => {
                             cleanData.status = realtimeStatus;
                             console.log('[REALTIME STATUS]', realtimeStatus);
                         }
-                        const prompt = detectPrompt(raw);
+                        // Only detect prompts in the last 8 lines (active prompt is always at bottom)
+                        const recentLines = raw.split('\n').slice(-8).join('\n');
+                        const prompt = detectPrompt(recentLines);
                         if (prompt) {
                             cleanData.prompt = prompt;
-                            // Build QUESTION: status for watch status bar
                             const parts = prompt.options.map(o => {
                                 if (o === prompt.options[0]) return '^ ' + o.label;
                                 if (o === prompt.options[prompt.options.length - 1]) return 'v ' + o.label;
@@ -1205,8 +1206,9 @@ wss.on('connection', (ws) => {
                         const realtimeTool = extractRealtimeTool(raw);
                         if (realtimeTool) cleanData.lastTool = realtimeTool;
 
-                        // Detect prompt
-                        const prompt = detectPrompt(raw);
+                        // Detect prompt (only in last 8 lines - active prompt is at bottom)
+                        const recentLines2 = raw.split('\n').slice(-8).join('\n');
+                        const prompt = detectPrompt(recentLines2);
                         if (prompt) {
                             cleanData.prompt = prompt;
                             const parts = prompt.options.map(o => {
@@ -1325,6 +1327,19 @@ wss.on('connection', (ws) => {
             }
             else if (data.type === 'accept' && activeSession) {
                 execSync(`tmux send-keys -t "${activeSession}" Tab && sleep 0.3 && tmux send-keys -t "${activeSession}" Enter`);
+            }
+            else if (data.type === 'pause') {
+                // Watch is starting dictation - stop sending output to avoid BT conflict
+                ws.paused = true;
+                if (pollInterval) clearInterval(pollInterval);
+                pollInterval = null;
+                console.log('Output paused (dictation)');
+            }
+            else if (data.type === 'resume') {
+                // Watch dictation done - resume output
+                ws.paused = false;
+                startPolling();
+                console.log('Output resumed');
             }
             else if (data.type === 'key' && activeSession) {
                 execSync(`tmux send-keys -t "${activeSession}" "${data.content}"`);

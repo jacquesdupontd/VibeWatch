@@ -4,7 +4,7 @@ Pebble.addEventListener('ready', function () {
     var sending = false;
 
     function connect() {
-        ws = new WebSocket('ws://localhost:8080');
+        ws = new WebSocket('ws://192.168.1.118:8080');
 
         ws.onopen = function () {
             console.log("Bridge OK");
@@ -133,17 +133,27 @@ Pebble.addEventListener('ready', function () {
     connect();
 
     var queue = [];
+    var failCount = 0;
+    var backedOff = false;
     function trySend() {
-        if (sending || queue.length === 0) return;
+        if (sending || queue.length === 0 || backedOff) return;
         var payload = queue.shift();
         sending = true;
 
-        // Timeout to avoid permanent lock if callback lost
         var safetyTimeout = setTimeout(function () {
             if (sending) {
-                console.log("Msg timeout - resetting queue");
+                console.log("Msg timeout");
                 sending = false;
-                trySend();
+                failCount++;
+                if (failCount >= 3) {
+                    console.log("Backoff: 3+ failures, clearing queue, wait 8s");
+                    queue = [];
+                    backedOff = true;
+                    failCount = 0;
+                    setTimeout(function() { backedOff = false; trySend(); }, 8000);
+                } else {
+                    trySend();
+                }
             }
         }, 3000);
 
@@ -151,14 +161,23 @@ Pebble.addEventListener('ready', function () {
             function () {
                 clearTimeout(safetyTimeout);
                 sending = false;
-                setTimeout(trySend, 20); // Small gap 
+                failCount = 0;
+                setTimeout(trySend, 20);
             },
             function (e) {
                 clearTimeout(safetyTimeout);
-                console.log("Send failed, retrying...");
-                queue.unshift(payload); // Put back
                 sending = false;
-                setTimeout(trySend, 500);
+                failCount++;
+                if (failCount >= 3) {
+                    console.log("Backoff: 3+ send fails, clearing queue, wait 8s");
+                    queue = [];
+                    backedOff = true;
+                    failCount = 0;
+                    setTimeout(function() { backedOff = false; trySend(); }, 8000);
+                } else {
+                    queue.unshift(payload);
+                    setTimeout(trySend, 500);
+                }
             }
         );
     }
@@ -182,6 +201,18 @@ Pebble.addEventListener('ready', function () {
         }
         else if (key === "accept") {
             ws.send(JSON.stringify({ type: 'accept' }));
+        }
+        else if (key === "pause") {
+            ws.send(JSON.stringify({ type: 'pause' }));
+            queue = [];
+            sending = false;
+            backedOff = true; // Block ALL sends to watch
+            console.log("PAUSE: all sends blocked");
+        }
+        else if (key === "resume") {
+            backedOff = false; // Unblock sends
+            console.log("RESUME: sends unblocked");
+            ws.send(JSON.stringify({ type: 'resume' }));
         }
         else {
             ws.send(JSON.stringify({ type: 'key', content: key }));
