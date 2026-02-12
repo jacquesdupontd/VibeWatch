@@ -1,5 +1,5 @@
 {
-  "name": "watchapp",
+  "name": "PebbleCode",
   "author": "MakeAwesomeHappen",
   "version": "1.0.0",
   "keywords": [
@@ -8,7 +8,7 @@
   "private": true,
   "dependencies": {},
   "pebble": {
-    "displayName": "watchapp",
+    "displayName": "PebbleCode",
     "uuid": "4c4314c9-5555-460d-9781-678440552b09",
     "sdkVersion": "3",
     "enableMultiJS": true,
