@@ -51,6 +51,9 @@ static char s_last_tool[256] = "";   // Increased for long commands
 static char s_suggestion[128] = "";  // Ghost text suggestion
 static char s_active_task[128] = ""; // Increased for long task names
 static bool s_task_running = false;  // Is a task currently running?
+static bool s_backlight_on = true;  // Backlight toggle (long press BACK)
+static int s_ready_counter = 0;     // Counts blink ticks while status is "Ready"
+static bool s_ready_vibrated = false; // Already vibrated for this Ready period
 static char s_prev_clean_cmd[128] = "";
 static char s_prev_clean_summary[1024] = "";
 static char s_prev_clean_status[32] = "Ready";
@@ -1120,8 +1123,20 @@ static void blink_tick(void *data) {
   if (s_anim_counter >= 1000)
     s_anim_counter = 0;
 
-  // Keep backlight on (every ~3s)
-  if (s_anim_counter % 12 == 0) light_enable_interaction();
+  // Keep backlight on (every ~3s) - only if enabled
+  if (s_backlight_on && s_anim_counter % 12 == 0) light_enable_interaction();
+
+  // Vibrate when Ready for 10+ seconds (blink_tick runs ~250ms, so 40 ticks = 10s)
+  if (s_state == STATE_SESSION && strstr(s_status, "Ready")) {
+    s_ready_counter++;
+    if (s_ready_counter >= 40 && !s_ready_vibrated) {
+      vibes_double_pulse();
+      s_ready_vibrated = true;
+    }
+  } else {
+    s_ready_counter = 0;
+    s_ready_vibrated = false;
+  }
 
   // Deferred CLEAN processing (heavy work outside inbox callback)
   if (s_clean_dirty) {
@@ -1323,6 +1338,21 @@ static void inbox_received_callback(DictionaryIterator *iterator,
       if (s_clean_status_layer) {
         layer_set_hidden(text_layer_get_layer(s_clean_status_layer), false);
         update_clean_ui_state();
+      }
+      // Vibrate on new suggestion (only when it first appears)
+      if (s_suggestion[0] && strcmp(s_suggestion, s_prev_clean_cmd) != 0) {
+        static char s_prev_suggestion[128] = "";
+        if (strcmp(s_suggestion, s_prev_suggestion) != 0) {
+          vibes_short_pulse();
+          strncpy(s_prev_suggestion, s_suggestion, sizeof(s_prev_suggestion) - 1);
+        }
+      }
+      // Vibrate on question (QUESTION: status)
+      if (strncmp(s_status, "QUESTION:", 9) == 0) {
+        if (strncmp(s_prev_clean_status, "QUESTION:", 9) != 0) {
+          // New question - double vibrate
+          vibes_double_pulse();
+        }
       }
       // Mark dirty - blink_tick will handle animations/history
       s_clean_dirty = true;
@@ -1735,20 +1765,19 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *ctx) {
   }
 }
 static void up_long_handler(ClickRecognizerRef recognizer, void *ctx) {
-  if (s_display_mode == MODE_CLEAN) {
-    // CLEAN mode: jump to latest block
-    if (s_clean_hist_count > 0) {
-      s_clean_hist_index = s_clean_hist_count - 1;
-      clean_show_history_index(s_clean_hist_index);
-      trigger_glitch_short();
-    }
-    vibes_double_pulse();
-  } else if (s_state == STATE_MENU) {
+  if (s_state == STATE_MENU) {
+    // Menu: create session
     send_msg("create");
     vibes_short_pulse();
   } else {
-    s_dark_mode = !s_dark_mode;
-    layer_mark_dirty(s_canvas);
+    // Session: toggle backlight
+    s_backlight_on = !s_backlight_on;
+    if (s_backlight_on) {
+      light_enable_interaction();
+    } else {
+      light_enable(false);
+    }
+    vibes_short_pulse();
   }
 }
 static void down_long_handler(ClickRecognizerRef recognizer, void *ctx) {
