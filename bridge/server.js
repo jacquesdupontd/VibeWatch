@@ -1328,6 +1328,13 @@ wss.on('connection', (ws) => {
             else if (data.type === 'accept' && activeSession) {
                 execSync(`tmux send-keys -t "${activeSession}" Tab && sleep 0.3 && tmux send-keys -t "${activeSession}" Enter`);
             }
+            else if (data.type === 'dictation' && activeSession) {
+                // Dictation: type text literally, then press Enter to submit
+                const safe = (data.content || '').replace(/'/g, "'\\''");
+                execSync(`tmux send-keys -t "${activeSession}" -l '${safe}'`);
+                execSync(`sleep 0.3 && tmux send-keys -t "${activeSession}" Enter`);
+                console.log('Dictation submitted:', data.content);
+            }
             else if (data.type === 'pause') {
                 // Watch is starting dictation - stop sending output to avoid BT conflict
                 ws.paused = true;

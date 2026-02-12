@@ -1533,57 +1533,98 @@ static void start_dictation_deferred(void *data) {
   if (s_status_marquee_anim) { property_animation_destroy(s_status_marquee_anim); s_status_marquee_anim = NULL; }
   free(malloc(2048)); // Bobby's memory trick
   APP_LOG(APP_LOG_LEVEL_INFO, "Starting dictation (heap: %d)", (int)heap_bytes_free());
-  s_dictation_window = window_create();
-  window_set_background_color(s_dictation_window, GColorBlack);
-  window_stack_push(s_dictation_window, false);
   dictation_session_start(s_dictation_session);
 }
 
-// Timer: send resume after dictation text was sent
+// Step 2: send resume to bridge, restart UI (with retry)
 static void post_dictation_resume(void *data) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "Sending resume");
-  send_msg("resume");
-  // Restart cursor timer (killed before dictation)
+  int retries = (int)(intptr_t)data;
+  DictionaryIterator *iter;
+  AppMessageResult res = app_message_outbox_begin(&iter);
+  if (res == APP_MSG_OK && iter) {
+    dict_write_cstring(iter, MESSAGE_KEY_TERMINAL_DATA, "resume");
+    app_message_outbox_send();
+    APP_LOG(APP_LOG_LEVEL_INFO, "Resume sent");
+  } else if (retries < 10) {
+    // Outbox busy, retry in 200ms
+    app_timer_register(200, post_dictation_resume, (void *)(intptr_t)(retries + 1));
+    return;
+  } else {
+    APP_LOG(APP_LOG_LEVEL_INFO, "Resume failed after retries");
+  }
   if (!s_cursor_timer) {
     s_cursor_timer = app_timer_register(250, blink_tick, NULL);
   }
 }
 
-// Timer: send dictation text, then schedule resume
+// Step 1: send "dictation:text" (bridge types + Enter in one shot), then resume
 static void post_dictation_send(void *data) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Post-dictation send");
   if (s_dictation_pending[0]) {
-    APP_LOG(APP_LOG_LEVEL_INFO, "Sending: %s", s_dictation_pending);
-    send_msg(s_dictation_pending);
+    char buf[220];
+    snprintf(buf, sizeof(buf), "dictation:%s", s_dictation_pending);
+    APP_LOG(APP_LOG_LEVEL_INFO, "Sending: %s", buf);
+    send_msg(buf);
     s_dictation_pending[0] = '\0';
-    // Wait for outbox to clear before sending resume
-    app_timer_register(500, post_dictation_resume, NULL);
+    app_timer_register(1000, post_dictation_resume, (void *)0);
   } else {
-    // No text, just resume immediately
-    send_msg("resume");
-    if (!s_cursor_timer) {
-      s_cursor_timer = app_timer_register(250, blink_tick, NULL);
-    }
+    post_dictation_resume((void *)0);
   }
 }
 
-// Strip non-ASCII from dictation text (Pebble only supports basic ASCII)
+// Replace accented chars with ASCII equivalents (UTF-8 0xC3 xx -> ascii)
+static char deaccent(unsigned char hi, unsigned char lo) {
+  if (hi == 0xC3) {
+    // àáâãä=a  ÀÁÂÃÄ=A  æ=a  Æ=A
+    if ((lo >= 0xA0 && lo <= 0xA5) || lo == 0xA6) return 'a';
+    if ((lo >= 0x80 && lo <= 0x85) || lo == 0x86) return 'A';
+    // èéêë=e  ÈÉÊË=E
+    if (lo >= 0xA8 && lo <= 0xAB) return 'e';
+    if (lo >= 0x88 && lo <= 0x8B) return 'E';
+    // ìíîï=i  ÌÍÎÏ=I
+    if (lo >= 0xAC && lo <= 0xAF) return 'i';
+    if (lo >= 0x8C && lo <= 0x8F) return 'I';
+    // òóôõö=o  ÒÓÔÕÖ=O
+    if (lo >= 0xB2 && lo <= 0xB6) return 'o';
+    if (lo >= 0x92 && lo <= 0x96) return 'O';
+    // ùúûü=u  ÙÚÛÜ=U
+    if (lo >= 0xB9 && lo <= 0xBC) return 'u';
+    if (lo >= 0x99 && lo <= 0x9C) return 'U';
+    // ç=c Ç=C  ñ=n Ñ=N  ý=y ÿ=y
+    if (lo == 0xA7) return 'c';
+    if (lo == 0x87) return 'C';
+    if (lo == 0xB1) return 'n';
+    if (lo == 0x91) return 'N';
+    if (lo == 0xBD || lo == 0xBF) return 'y';
+  }
+  return 0; // Unknown -> skip
+}
+
+// Strip non-ASCII from dictation text, replacing accents with equivalents
 static void sanitize_ascii(char *dst, const char *src, size_t maxlen) {
   size_t j = 0;
   for (size_t i = 0; src[i] && j < maxlen - 1; i++) {
     unsigned char c = (unsigned char)src[i];
     if (c >= 0x20 && c <= 0x7E) {
-      dst[j++] = (char)c; // Printable ASCII
+      dst[j++] = (char)c;
     } else if (c == '\n' || c == '\r') {
-      dst[j++] = ' '; // Newlines become spaces
+      dst[j++] = ' ';
+    } else if (c == 0xC3 && src[i + 1]) {
+      // UTF-8 two-byte accent -> ASCII equivalent
+      char r = deaccent(c, (unsigned char)src[i + 1]);
+      if (r) dst[j++] = r;
+      i++; // Skip second byte
+    } else if (c >= 0xC0) {
+      // Other multi-byte UTF-8: skip all continuation bytes
+      i++;
+      while (src[i] && ((unsigned char)src[i] & 0xC0) == 0x80) i++;
+      i--; // Loop will i++
     }
-    // Skip all non-ASCII bytes (accents, emojis, etc.)
   }
   dst[j] = '\0';
 }
 
-// Dictation callback - store text, schedule deferred send
-// Bridge is paused so BT is quiet -> timers should work
+// Dictation callback - user confirmed in native Pebble UI -> send directly
 static void dictation_callback(DictationSession *session,
                                 DictationSessionStatus status,
                                 char *transcription, void *context) {
@@ -1592,14 +1633,8 @@ static void dictation_callback(DictationSession *session,
     sanitize_ascii(s_dictation_pending, transcription, sizeof(s_dictation_pending));
     APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_dictation_pending);
   }
-  // Pop blank window back to main
-  if (s_dictation_window) {
-    window_stack_pop(false);
-    window_destroy(s_dictation_window);
-    s_dictation_window = NULL;
-  }
   s_in_dictation = false;
-  // Send text + resume after 500ms (let system settle)
+  // Send "dictation:text" + resume via timer (bridge is paused, BT quiet)
   app_timer_register(500, post_dictation_send, NULL);
 }
 
@@ -1960,10 +1995,8 @@ static void init() {
   // Dictation session for voice input
   // Buffer size 0 = dynamic allocation (like Bobby does)
   s_dictation_session = dictation_session_create(0, dictation_callback, NULL);
-  // Skip confirmation screen (like Bobby) - go straight from speech to callback
-  if (s_dictation_session) {
-    dictation_session_enable_confirmation(s_dictation_session, false);
-  }
+  // Keep native confirmation screen so user can review text before sending
+  // (default is enabled, no need to call enable_confirmation)
   APP_LOG(APP_LOG_LEVEL_INFO, "Dictation session: %p", s_dictation_session);
   window_stack_push(s_window, true);
 }

@@ -202,6 +202,9 @@ Pebble.addEventListener('ready', function () {
         else if (key === "accept") {
             ws.send(JSON.stringify({ type: 'accept' }));
         }
+        else if (key.indexOf("dictation:") === 0) {
+            ws.send(JSON.stringify({ type: 'dictation', content: key.substring(10) }));
+        }
         else if (key === "pause") {
             ws.send(JSON.stringify({ type: 'pause' }));
             queue = [];
@@ -210,9 +213,11 @@ Pebble.addEventListener('ready', function () {
             console.log("PAUSE: all sends blocked");
         }
         else if (key === "resume") {
-            backedOff = false; // Unblock sends
+            backedOff = false;
+            failCount = 0;
             console.log("RESUME: sends unblocked");
             ws.send(JSON.stringify({ type: 'resume' }));
+            setTimeout(trySend, 500); // Kick-start send queue
         }
         else {
             ws.send(JSON.stringify({ type: 'key', content: key }));
