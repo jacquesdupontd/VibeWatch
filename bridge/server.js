@@ -145,13 +145,13 @@ function formatForClean(text) {
 function clampText(str, maxLen) {
     if (!str) return str;
     if (str.length <= maxLen) return str;
-    return str.substring(0, maxLen - 3) + '...';
+    return str.substring(0, maxLen);
 }
 
 function clampTextEnd(str, maxLen) {
     if (!str) return str;
     if (str.length <= maxLen) return str;
-    return '...' + str.substring(str.length - (maxLen - 3));
+    return str.substring(str.length - maxLen);
 }
 
 function firstLineWithEllipsis(str, maxLen) {
@@ -160,13 +160,13 @@ function firstLineWithEllipsis(str, maxLen) {
     let line = parts[0] || '';
     let hasMore = parts.length > 1;
     if (line.length > maxLen) {
-        line = '...' + line.substring(line.length - (maxLen - 3));
+        line = line.substring(line.length - maxLen);
     }
     if (hasMore) {
-        if (line.length + 4 > maxLen) {
-            line = line.substring(0, Math.max(0, maxLen - 4)) + '...';
+        if (line.length > maxLen) {
+            line = line.substring(0, maxLen);
         } else {
-            line = line + ' ...';
+            line = line;
         }
     }
     return line;
@@ -273,6 +273,39 @@ function detectSuggestionFromTmux(raw) {
         break;
     }
     return null;
+}
+
+// Extract tool result summaries like "Searched for 1 pattern, read 1 file"
+function extractToolResultSummary(raw) {
+    if (!raw) return '';
+    const cleaned = clean(raw);
+    const lines = cleaned.split('\n');
+    // Search from bottom up for tool result summary lines
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--) {
+        const s = lines[i].trim();
+        if (!s) continue;
+        // "Searched for X pattern, read Y file(s)"
+        if (/^Searched for \d+/i.test(s)) return s;
+        // "Read X file(s)" / "Read X lines"
+        if (/^Read \d+ (file|line)/i.test(s)) return s;
+        // "Wrote X file(s)" / "Wrote to"
+        if (/^Wrote (to|\d+)/i.test(s)) return s;
+        // "Edited X file(s)"
+        if (/^Edited \d+/i.test(s)) return s;
+        // "Found X file(s)" / "Found X match"
+        if (/^Found \d+/i.test(s)) return s;
+        // "X files changed" / "X insertions" / "X deletions"
+        if (/^\d+ file.* changed/i.test(s)) return s;
+        // "Created X" / "Deleted X"
+        if (/^(Created|Deleted) /i.test(s)) return s;
+        // "BUILD SUCCESSFUL" / "BUILD FAILED"
+        if (/^BUILD (SUCCESSFUL|FAILED)/i.test(s)) return s;
+        // "Success" / "DONE"
+        if (/^(Success|DONE)$/i.test(s)) return s;
+        // "X tests passed"
+        if (/^\d+ tests? (passed|failed)/i.test(s)) return s;
+    }
+    return '';
 }
 
 function extractDiffBackdrop(raw) {
@@ -928,14 +961,14 @@ function extractRealtimeText(raw) {
     }
 
     if (paragraphs.length > 0) {
-        const recent = paragraphs.slice(-3);
+        const recent = paragraphs.slice(-15);
         let summary = recent.join('\n');  // Join with newlines to preserve structure
         // Remove ALL emojis comprehensively
         summary = removeEmojis(summary);
         // Remove remaining non-ASCII chars (except newlines)
         summary = summary.replace(/[^\x20-\x7E\n]/g, '');
-        if (summary.length > 800) {
-            summary = '...' + summary.substring(summary.length - 797);
+        if (summary.length > 2000) {
+            summary = '...' + summary.substring(summary.length - 1997);
         }
         return summary;
     }
@@ -1067,10 +1100,10 @@ function parseStreamJSON(raw) {
 
     // Build summary from text parts (show most recent)
     if (textParts.length > 0) {
-        const recent = textParts.slice(-3);
+        const recent = textParts.slice(-15);
         result.summary = recent.join(' ');
-        if (result.summary.length > 800) {
-            result.summary = '...' + result.summary.substring(result.summary.length - 797);
+        if (result.summary.length > 2000) {
+            result.summary = '...' + result.summary.substring(result.summary.length - 1997);
         }
     }
 
@@ -1132,6 +1165,48 @@ function createSession(name) {
         execSync(`tmux new-session -d -s "${name}" -c "${dir}" "cd '${dir}' && claude"`);
         return name;
     } catch { return null; }
+}
+
+// =======================================================
+// SESSION HISTORY BUFFER — persists across client reconnects
+// =======================================================
+const sessionHistory = {};  // sessionName -> { summaries: string[], lastSummary: string, lastUserCmd: string }
+const MAX_HISTORY_LINES = 300;
+
+function getSessionHistory(name) {
+    if (!sessionHistory[name]) {
+        sessionHistory[name] = { summaries: [], lastSummary: '', lastUserCmd: '' };
+    }
+    return sessionHistory[name];
+}
+
+function archiveToHistory(name, summary) {
+    const hist = getSessionHistory(name);
+    if (!summary || summary === hist.lastSummary) return;
+    const lines = summary.split('\n').filter(l => l.trim());
+    if (lines.length === 0) return;
+    if (hist.summaries.length > 0) hist.summaries.push('---SEP---');
+    hist.summaries.push(...lines);
+    while (hist.summaries.length > MAX_HISTORY_LINES) hist.summaries.shift();
+    hist.lastSummary = summary;
+}
+
+// Check if a new turn started (userCmd changed or summary drastically different)
+function checkNewTurn(name, cleanData) {
+    const hist = getSessionHistory(name);
+    const cmd = cleanData.userCmd || '';
+    const summary = cleanData.summary || '';
+
+    // New user command = new turn
+    if (cmd && cmd !== hist.lastUserCmd && hist.lastUserCmd) {
+        archiveToHistory(name, hist.lastSummary);
+        hist.lastUserCmd = cmd;
+    } else if (cmd && !hist.lastUserCmd) {
+        hist.lastUserCmd = cmd;
+    }
+
+    // Track current summary
+    if (summary) hist.lastSummary = summary;
 }
 
 const wss = new WebSocket.Server({ port: PORT });
@@ -1199,9 +1274,19 @@ wss.on('connection', (ws) => {
                             { encoding: 'utf8', timeout: 1000 }
                         );
                         const realtimeStatus = extractRealtimeStatus(raw);
-                        if (realtimeStatus && cleanData.status !== 'QUESTION') {
+                        if (realtimeStatus && cleanData.status !== 'QUESTION' && !cleanData.isConfirmedReady) {
                             cleanData.status = realtimeStatus;
                             console.log('[REALTIME STATUS]', realtimeStatus);
+                        }
+                        // Real-time tool from tmux (e.g. "$ gradle build", "read Theme.kt")
+                        const realtimeTool = extractRealtimeTool(raw);
+                        if (realtimeTool) {
+                            cleanData.lastTool = realtimeTool;
+                        }
+                        // Tool result summaries (e.g. "Searched for 1 pattern")
+                        const toolSummary = extractToolResultSummary(raw);
+                        if (toolSummary && !cleanData.diff) {
+                            cleanData.diff = toolSummary;
                         }
                         // Only detect prompts in the last 8 lines (active prompt is always at bottom)
                         const recentLines = raw.split('\n').slice(-8).join('\n');
@@ -1241,6 +1326,11 @@ wss.on('connection', (ws) => {
                         const diff = extractDiffBackdrop(raw);
                         if (diff) {
                             cleanData.diff = diff;
+                        }
+                        // Tool result summaries (e.g. "Searched for 1 pattern")
+                        if (!cleanData.diff) {
+                            const toolSummary = extractToolResultSummary(raw);
+                            if (toolSummary) cleanData.diff = toolSummary;
                         }
                     } catch (e) { }
 
@@ -1306,6 +1396,11 @@ wss.on('connection', (ws) => {
 
                         const diff = extractDiffBackdrop(raw);
                         if (diff) cleanData.diff = diff;
+                        // Tool result summaries (e.g. "Searched for 1 pattern")
+                        if (!cleanData.diff) {
+                            const toolSummary = extractToolResultSummary(raw);
+                            if (toolSummary) cleanData.diff = toolSummary;
+                        }
                     }
                 }
 
@@ -1320,7 +1415,7 @@ wss.on('connection', (ws) => {
                     }
                 }
 
-                // Normalize accents and preserve bullets/newlines for CLEAN mode
+                // Normalize accents and preserve bullets/newlines
                 cleanData.summary = stripAccents(formatForClean(cleanData.summary));
                 cleanData.userCmd = stripAccents(cleanData.userCmd || '');
                 cleanData.lastTool = stripAccents(cleanData.lastTool || '');
@@ -1329,27 +1424,24 @@ wss.on('connection', (ws) => {
                 cleanData.suggestion = stripAccents(cleanData.suggestion || '');
                 cleanData.diff = stripAccents(cleanData.diff || '');
 
-                // Clamp to avoid AppMessage overflow
-                cleanData.summary = clampTextEnd(cleanData.summary, 500);
-                cleanData.userCmd = firstLineWithEllipsis(cleanData.userCmd, 160);
-                cleanData.lastTool = clampText(cleanData.lastTool, 80);
-                cleanData.status = clampText(cleanData.status, 40);
-                cleanData.activeTask = clampText(cleanData.activeTask, 80);
-                cleanData.suggestion = clampText(cleanData.suggestion, 120);
-                cleanData.diff = clampTextEnd(cleanData.diff, 600);
-
                 // If status is stuck on Working but no active task/tool, mark Ready
                 if (cleanData.status &&
                     cleanData.status.toLowerCase().includes('working') &&
                     !cleanData.activeTask && !cleanData.lastTool) {
-                    // Don't override JSONL thinking words like "Razzle-dazzling..."
                     if (!cleanData.status.endsWith('...') &&
                         cleanData.summary && cleanData.summary.length > 0) {
                         cleanData.status = 'Ready';
                     }
                 }
 
+                // Track turn boundaries for history
+                checkNewTurn(activeSession, cleanData);
+
+                // WebSocket gets FULL unclamped data
                 const msg = { type: 'output', content: cleanData.summary, cleanData };
+
+                // No clamping — WebSocket has no size limit
+                // Pebble CLEAN clamping happens in pkjs/index.js
                 if (suggestion) msg.suggestion = suggestion;
                 if (cleanData.prompt) msg.prompt = cleanData.prompt;
 
@@ -1390,6 +1482,15 @@ wss.on('connection', (ws) => {
                 lastSent = '';
                 deepCaptureTicks = 6;
                 ws.send(JSON.stringify({ type: 'session_joined', name: data.name }));
+                // Send accumulated history
+                const hist = getSessionHistory(data.name);
+                if (hist.summaries.length > 0) {
+                    ws.send(JSON.stringify({
+                        type: 'history',
+                        lines: hist.summaries
+                    }));
+                    console.log(`[HISTORY] Sent ${hist.summaries.length} lines for '${data.name}'`);
+                }
                 startPolling();
             }
             else if (data.type === 'leave') {
@@ -1400,9 +1501,15 @@ wss.on('connection', (ws) => {
                 execSync(`tmux send-keys -t "${activeSession}" Tab && sleep 0.3 && tmux send-keys -t "${activeSession}" Enter`);
             }
             else if (data.type === 'dictation' && activeSession) {
-                // Dictation: type text literally, then press Enter to submit
-                const safe = (data.content || '').replace(/'/g, "'\\''");
-                execSync(`tmux send-keys -t "${activeSession}" -l '${safe}'`);
+                // Dictation: send text in chunks to avoid tmux buffer overflow
+                const text = data.content || '';
+                const chunkSize = 40;
+                for (let i = 0; i < text.length; i += chunkSize) {
+                    const chunk = text.substring(i, i + chunkSize);
+                    const safe = chunk.replace(/'/g, "'\\''");
+                    execSync(`tmux send-keys -t "${activeSession}" -l '${safe}'`);
+                    if (i + chunkSize < text.length) execSync(`sleep 0.05`);
+                }
                 execSync(`sleep 0.3 && tmux send-keys -t "${activeSession}" Enter`);
                 console.log('Dictation submitted:', data.content);
             }

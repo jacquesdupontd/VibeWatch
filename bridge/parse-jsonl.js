@@ -115,7 +115,8 @@ function extractCleanData(events) {
         userCmd: '',
         status: 'Ready',
         activeTask: '',
-        suggestion: ''
+        suggestion: '',
+        isConfirmedReady: false
     };
 
     // Process events in reverse (most recent first)
@@ -175,9 +176,13 @@ function extractCleanData(events) {
         }
     }
 
-    // Find tool_use ONLY from the latest assistant message
-    if (latestAssistantMsg && Array.isArray(latestAssistantMsg.content)) {
-        for (const block of latestAssistantMsg.content) {
+    // Find tool_use from recent assistant messages (search last 10, not just the latest)
+    let toolFound = false;
+    for (const event of reversedEvents) {
+        if (toolFound) break;
+        if (event.type !== 'assistant' || !Array.isArray(event.message?.content)) continue;
+
+        for (const block of event.message.content) {
             if (block.type === 'tool_use') {
                 result.lastTool = formatToolUse(block.name, block.input);
 
@@ -196,21 +201,24 @@ function extractCleanData(events) {
                     }
                 }
 
-                // Only mark running if the latest stop_reason indicates tool_use or streaming
-                const isRunningTurn = !doneTurn &&
-                    (latestStopReason === 'tool_use' || latestStopReason === null || latestStopReason === undefined);
+                // Only mark running if this is the latest msg AND stop_reason indicates tool_use
+                if (event.message === latestAssistantMsg) {
+                    const isRunningTurn = !doneTurn &&
+                        (latestStopReason === 'tool_use' || latestStopReason === null || latestStopReason === undefined);
 
-                if (isRunningTurn) {
-                    const hasResult = reversedEvents.some(e =>
-                        Array.isArray(e.message?.content) && e.message.content.some(b =>
-                            b.type === 'tool_result' && b.tool_use_id === block.id
-                        )
-                    );
-                    if (!hasResult) {
-                        result.activeTask = getTaskFromTool(block.name, block.input);
-                        result.status = 'Working...';
+                    if (isRunningTurn) {
+                        const hasResult = reversedEvents.some(e =>
+                            Array.isArray(e.message?.content) && e.message.content.some(b =>
+                                b.type === 'tool_result' && b.tool_use_id === block.id
+                            )
+                        );
+                        if (!hasResult) {
+                            result.activeTask = getTaskFromTool(block.name, block.input);
+                            result.status = 'Working...';
+                        }
                     }
                 }
+                toolFound = true;
                 break;
             }
         }
@@ -220,6 +228,9 @@ function extractCleanData(events) {
     if (doneTurn) {
         result.activeTask = '';
         result.status = 'Ready';
+        // Confirmed ready = end_turn AND last event is NOT a user message (no new prompt pending)
+        const lastEvent = events[events.length - 1];
+        result.isConfirmedReady = !(lastEvent && lastEvent.type === 'user');
     }
 
     // Find most recent user message
