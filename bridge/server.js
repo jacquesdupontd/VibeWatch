@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 const { findActiveJsonl, parseRecentJsonl, extractCleanData } = require('./parse-jsonl');
 
-const PORT = 8080;
+const PORT = process.env.BRIDGE_PORT || 9090;
 const POLL_MS = 400;
 const PROJECT_BASE = process.env.HOME + '/PebbleVibeProjects';
 
